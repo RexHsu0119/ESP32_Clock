@@ -1,117 +1,105 @@
 #include "my_rtc.h"
-#include "esp_sntp.h" // 改回使用 esp_sntp.h
-#include "nvs_flash.h"
-#include "esp_log.h"
-#include <sys/time.h>
-#include <string.h>
 
-// 新增這兩行來支援 vTaskDelay
+#include "esp_log.h"
+#include "esp_sntp.h"
+#include "nvs.h"
+
+#include <inttypes.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/time.h>
+#include <time.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "RTC";
 
-// 時間同步回調函數
+/* NTP 同步完成旗標 */
+static volatile bool s_ntp_synced = false;
+
+/* 時間同步回調函數 */
 static void time_sync_notification_cb(struct timeval *tv)
 {
-    ESP_LOGI(TAG, "時間已從 NTP 伺服器同步");
-    time_t now = time(NULL);
-    struct tm *timeinfo = localtime(&now);
-    ESP_LOGI(TAG, "當前時間: %04d-%02d-%02d %02d:%02d:%02d",
-             timeinfo->tm_year + 1900,
-             timeinfo->tm_mon + 1,
-             timeinfo->tm_mday,
-             timeinfo->tm_hour,
-             timeinfo->tm_min,
-             timeinfo->tm_sec);
+    (void)tv;
+    s_ntp_synced = true;
+    ESP_LOGI(TAG, "NTP 回調：時間同步完成");
 }
 
 void my_rtc_init(void)
 {
     ESP_LOGI(TAG, "RTC 初始化");
 
-    // 設置時區為臺灣時間 (UTC+8)
+    /* 設置時區為台灣時間 UTC+8 */
     setenv("TZ", "CST-8", 1);
     tzset();
 
-    ESP_LOGI(TAG, "時區已設置為 UTC+8 (臺灣時間)");
+    ESP_LOGI(TAG, "時區已設置為 UTC+8 (台灣時間)");
 }
 
 void rtc_sync_from_ntp(void)
 {
     ESP_LOGI(TAG, "開始從 NTP 伺服器同步時間...");
 
-    // 0. 強制將系統本地時間設回 1970 年...
-    struct timeval tv_reset = {.tv_sec = 0, .tv_usec = 0};
-    settimeofday(&tv_reset, NULL);
+    s_ntp_synced = false;
 
-    // ✨ 關鍵優化 1：拿到 IP 後不要急著發送，等待路由器完全開通對外網路
-    ESP_LOGI(TAG, "等待網路路由穩定...");
-    vTaskDelay(2000 / portTICK_PERIOD_MS); // 停頓 2 秒
+    /* 若之前已啟動過 SNTP，先停止避免狀態殘留 */
+    if (esp_sntp_enabled())
+    {
+        esp_sntp_stop();
+    }
 
-    // 1. 初始化並設定 NTP 伺服器
+    /* 已拿到 IP 後只需短暫等待 */
+    ESP_LOGI(TAG, "等待網路穩定...");
+    vTaskDelay(pdMS_TO_TICKS(300));
+
+    /* 設定 SNTP */
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    // ✨ 補上這行：強制收到時間後「立刻精準覆蓋」，解決秒數慢的問題
     sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
+    sntp_set_sync_interval(3600000); /* 1 小時同步一次 */
 
-    sntp_set_sync_interval(3600000);
+    /* 使用較穩定的 NTP server */
+    esp_sntp_setservername(0, "time.google.com");
+    esp_sntp_setservername(1, "time.cloudflare.com");
+    esp_sntp_setservername(2, "pool.ntp.org");
 
-    // ✨ 終極優化：將「純 IP」放到第 0 順位，徹底避開手機熱點緩慢的 DNS 解析
-    esp_sntp_setservername(0, "162.159.200.1");       // Cloudflare 時間伺服器 (純IP)
-    esp_sntp_setservername(1, "time.stdtime.gov.tw"); // 國家時間實驗室 (備用)
-    esp_sntp_setservername(2, "pool.ntp.org");        // NTP 池 (備用)
-
-    // 3. 註冊非同步回調函數
     sntp_set_time_sync_notification_cb(time_sync_notification_cb);
 
-    // 4. 初始化
+    /* 啟動 SNTP */
     esp_sntp_init();
 
     ESP_LOGI(TAG, "SNTP 客戶端已啟動，等待時間同步...");
 
-    // 5. 改用「直接檢查年份」來判斷對時是否成功
-    int retry = 0;
-    const int retry_count = 90; // ✨ 若使用熱點，把耐心放大到 90 秒，避免早退
-    bool sync_success = false;
-
-    while (retry < retry_count)
+    /* 最多等待 10 秒 */
+    const int retry_count = 10;
+    for (int retry = 0; retry < retry_count; retry++)
     {
-        // 抓取當前系統時間
-        time_t now = time(NULL);
-        struct tm timeinfo = {0};
-        localtime_r(&now, &timeinfo);
-
-        // 如果年份大於 2026 (表示真正從小於等於2026的舊時間更新到了2027年以上的未來，或至少能確保目前不是舊時間)
-        // 更精確的作法：只要 NTP 對時成功，time_sync_notification_cb 就會被觸發
-        // 但為了防呆，我們檢查年份：1900 + timeinfo.tm_year
-        int current_year = 1900 + timeinfo.tm_year;
-
-        ESP_LOGI(TAG, "等待 NTP 同步... 當前系統年份: %d (%d/%d)", current_year, retry + 1, retry_count);
-
-        // ESP32 沒有電池時預設是 1970。您之前 NVS 存了 2026。
-        // 如果現在真實年份是 2024 / 2025，這通常表示已經更新了 (或者我們可以單純等 sntp 內部狀態)
-        // 最好的做法是：只要時間的回調函數被呼叫，就代表成功了！
-
-        if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED || current_year > 2000)
+        if (s_ntp_synced)
         {
-            // 注意：如果您 NVS 存的是錯的 2026，這裡大於 2000 也會馬上跳出。
-            // 所以我們需要強制將系統時間先歸零到 1970！
-            sync_success = true;
-            break;
+            time_t now = time(NULL);
+            struct tm timeinfo;
+
+            if (localtime_r(&now, &timeinfo) != NULL)
+            {
+                ESP_LOGI(TAG, "NTP 同步成功: %04d-%02d-%02d %02d:%02d:%02d",
+                         timeinfo.tm_year + 1900,
+                         timeinfo.tm_mon + 1,
+                         timeinfo.tm_mday,
+                         timeinfo.tm_hour,
+                         timeinfo.tm_min,
+                         timeinfo.tm_sec);
+            }
+
+            rtc_save_to_nvs();
+            return;
         }
 
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-        retry++;
+        ESP_LOGI(TAG, "等待 NTP 同步... (%d/%d)", retry + 1, retry_count);
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    if (sync_success)
-    {
-        ESP_LOGI(TAG, "NTP 時間同步成功！(或已抓到合理年份)");
-    }
-    else
-    {
-        ESP_LOGW(TAG, "NTP 時間同步超時或失敗！");
-    }
+    ESP_LOGW(TAG, "NTP 時間同步超時或失敗，保留目前/NVS時間");
 }
 
 void rtc_load_from_nvs(void)
@@ -126,20 +114,32 @@ void rtc_load_from_nvs(void)
 
         if (err == ESP_OK)
         {
-            time_t saved_time = (time_t)saved_time_i64;
-            struct timeval tv = {
-                .tv_sec = saved_time,
-                .tv_usec = 0};
-            settimeofday(&tv, NULL);
+            /* 合理範圍：2020-01-01 ~ 2100-01-01 */
+            if (saved_time_i64 > 1577836800LL && saved_time_i64 < 4102444800LL)
+            {
+                time_t saved_time = (time_t)saved_time_i64;
+                struct timeval tv = {
+                    .tv_sec = saved_time,
+                    .tv_usec = 0};
 
-            struct tm *timeinfo = localtime(&saved_time);
-            ESP_LOGI(TAG, "從 NVS 加載時間成功: %04d-%02d-%02d %02d:%02d:%02d",
-                     timeinfo->tm_year + 1900,
-                     timeinfo->tm_mon + 1,
-                     timeinfo->tm_mday,
-                     timeinfo->tm_hour,
-                     timeinfo->tm_min,
-                     timeinfo->tm_sec);
+                settimeofday(&tv, NULL);
+
+                struct tm timeinfo;
+                if (localtime_r(&saved_time, &timeinfo) != NULL)
+                {
+                    ESP_LOGI(TAG, "從 NVS 載入時間成功: %04d-%02d-%02d %02d:%02d:%02d",
+                             timeinfo.tm_year + 1900,
+                             timeinfo.tm_mon + 1,
+                             timeinfo.tm_mday,
+                             timeinfo.tm_hour,
+                             timeinfo.tm_min,
+                             timeinfo.tm_sec);
+                }
+            }
+            else
+            {
+                ESP_LOGW(TAG, "NVS 中的時間值不合理，忽略載入: %" PRId64, saved_time_i64);
+            }
         }
         else if (err == ESP_ERR_NVS_NOT_FOUND)
         {
@@ -176,6 +176,8 @@ void rtc_save_to_nvs(void)
         if (err != ESP_OK)
         {
             ESP_LOGE(TAG, "設置 NVS 時間失敗: %s", esp_err_to_name(err));
+            nvs_close(nvs_handle);
+            return;
         }
 
         err = nvs_commit(nvs_handle);
@@ -185,14 +187,17 @@ void rtc_save_to_nvs(void)
         }
         else
         {
-            struct tm *timeinfo = localtime(&now);
-            ESP_LOGD(TAG, "時間已保存到 NVS: %04d-%02d-%02d %02d:%02d:%02d",
-                     timeinfo->tm_year + 1900,
-                     timeinfo->tm_mon + 1,
-                     timeinfo->tm_mday,
-                     timeinfo->tm_hour,
-                     timeinfo->tm_min,
-                     timeinfo->tm_sec);
+            struct tm timeinfo;
+            if (localtime_r(&now, &timeinfo) != NULL)
+            {
+                ESP_LOGD(TAG, "時間已保存到 NVS: %04d-%02d-%02d %02d:%02d:%02d",
+                         timeinfo.tm_year + 1900,
+                         timeinfo.tm_mon + 1,
+                         timeinfo.tm_mday,
+                         timeinfo.tm_hour,
+                         timeinfo.tm_min,
+                         timeinfo.tm_sec);
+            }
         }
 
         nvs_close(nvs_handle);

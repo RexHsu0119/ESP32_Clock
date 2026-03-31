@@ -1,3 +1,3 @@
 idf_component_register(SRCS "rtc.c"
                        INCLUDE_DIRS "."
-                       REQUIRES esp_common nvs_flash)
+                       REQUIRES esp_common nvs_flash lwip)
