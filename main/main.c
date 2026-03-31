@@ -88,6 +88,10 @@ static void update_ui(void)
             {
                 lv_label_set_text(status_label, "Offline");
             }
+            else if (rtc_is_ntp_synced())
+            {
+                lv_label_set_text(status_label, "Synced");
+            }
             else
             {
                 lv_label_set_text(status_label, "");
@@ -325,10 +329,10 @@ void app_main(void)
         update_ui();
     }
 
-    /* 主迴圈每秒更新一次時間 */
+    /* 主迴圈每0.5秒更新一次時間 */
     while (1)
     {
         update_ui();
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }

@@ -38,6 +38,11 @@ void my_rtc_init(void)
     ESP_LOGI(TAG, "時區已設置為 UTC+8 (台灣時間)");
 }
 
+bool rtc_is_ntp_synced(void)
+{
+    return s_ntp_synced;
+}
+
 void rtc_sync_from_ntp(void)
 {
     ESP_LOGI(TAG, "開始從 NTP 伺服器同步時間...");
@@ -50,28 +55,25 @@ void rtc_sync_from_ntp(void)
         esp_sntp_stop();
     }
 
-    /* 已拿到 IP 後只需短暫等待 */
     ESP_LOGI(TAG, "等待網路穩定...");
     vTaskDelay(pdMS_TO_TICKS(300));
 
     /* 設定 SNTP */
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
-    sntp_set_sync_interval(3600000); /* 1 小時同步一次 */
+    sntp_set_sync_interval(1800000); /* 0.5 小時同步一次 */
 
-    /* 使用較穩定的 NTP server */
     esp_sntp_setservername(0, "time.google.com");
     esp_sntp_setservername(1, "time.cloudflare.com");
     esp_sntp_setservername(2, "pool.ntp.org");
 
     sntp_set_time_sync_notification_cb(time_sync_notification_cb);
 
-    /* 啟動 SNTP */
     esp_sntp_init();
 
     ESP_LOGI(TAG, "SNTP 客戶端已啟動，等待時間同步...");
 
-    /* 最多等待 10 秒 */
+    /* 最多等待 10 秒，但超過後不代表真正失敗，SNTP 仍會在背景繼續 */
     const int retry_count = 10;
     for (int retry = 0; retry < retry_count; retry++)
     {
@@ -99,7 +101,7 @@ void rtc_sync_from_ntp(void)
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    ESP_LOGW(TAG, "NTP 時間同步超時或失敗，保留目前/NVS時間");
+    ESP_LOGW(TAG, "NTP 在等待視窗內未完成，將繼續於背景等待同步");
 }
 
 void rtc_load_from_nvs(void)

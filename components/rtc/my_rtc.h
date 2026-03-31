@@ -1,6 +1,7 @@
 #ifndef RTC_H
 #define RTC_H
 
+#include <stdbool.h>
 #include <time.h>
 
 /**
@@ -12,6 +13,11 @@ void my_rtc_init(void);
  * @brief 從 NTP 伺服器同步時間
  */
 void rtc_sync_from_ntp(void);
+
+/**
+ * @brief 查詢 NTP 是否已同步成功
+ */
+bool rtc_is_ntp_synced(void);
 
 /**
  * @brief 從 NVS 加載上次保存的時間

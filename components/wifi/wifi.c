@@ -2,12 +2,13 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "esp_netif.h" // 新增這行：處理網路介面
+#include "esp_netif.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include <string.h>
 
 static const char *TAG = "WIFI";
 
@@ -23,6 +24,8 @@ static bool wifi_initialized = false;
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
 {
+    (void)arg;
+
     if (event_base == WIFI_EVENT)
     {
         if (event_id == WIFI_EVENT_STA_START)
@@ -32,11 +35,13 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         }
         else if (event_id == WIFI_EVENT_STA_DISCONNECTED)
         {
+            xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
+
             if (retry_num < MAXIMUM_RETRY)
             {
                 esp_wifi_connect();
                 retry_num++;
-                ESP_LOGI(TAG, "重試連接 WIFI...");
+                ESP_LOGI(TAG, "重試連接 WIFI... (%d/%d)", retry_num, MAXIMUM_RETRY);
             }
             else
             {
@@ -49,8 +54,13 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "成功獲取 IP 位址:" IPSTR, IP2STR(&event->ip_info.ip));
+
+        /* 關閉 Wi-Fi Power Save，減少 NTP/UDP 封包延遲 */
+        esp_wifi_set_ps(WIFI_PS_NONE);
+
         retry_num = 0;
-        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT); // <-- 這是關鍵！
+        xEventGroupClearBits(wifi_event_group, WIFI_FAIL_BIT);
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
 
@@ -62,13 +72,15 @@ bool wifi_init(void)
         return true;
     }
 
-    // 創建事件組
     wifi_event_group = xEventGroupCreate();
+    if (wifi_event_group == NULL)
+    {
+        ESP_LOGE(TAG, "建立 WIFI 事件組失敗");
+        return false;
+    }
 
-    // 1. 初始化底層 LwIP 網路配置
     ESP_ERROR_CHECK(esp_netif_init());
 
-    // 2. 必須先建立預設事件迴圈 (Event Loop)！
     esp_err_t ret = esp_event_loop_create_default();
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE)
     {
@@ -76,14 +88,15 @@ bool wifi_init(void)
         return false;
     }
 
-    // 3. 建立事件迴圈後，才可以建立預設的 Wi-Fi STA 網路介面
-    esp_netif_create_default_wifi_sta();
+    if (esp_netif_create_default_wifi_sta() == NULL)
+    {
+        ESP_LOGE(TAG, "建立預設 WIFI STA 介面失敗");
+        return false;
+    }
 
-    // 4. 初始化 Wi-Fi 驅動
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    // 註冊事件處理器
     ret = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL);
     if (ret != ESP_OK)
     {
@@ -98,7 +111,6 @@ bool wifi_init(void)
         return false;
     }
 
-    // 設置 WIFI 模式
     ret = esp_wifi_set_mode(WIFI_MODE_STA);
     if (ret != ESP_OK)
     {
@@ -125,17 +137,14 @@ bool wifi_connect(const char *ssid, const char *password)
         return false;
     }
 
-    // 清除事件位
     xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
     retry_num = 0;
 
-    // 配置 WIFI 連接
-    wifi_config_t wifi_config = {0}; // 先將結構體清零
+    wifi_config_t wifi_config = {0};
 
     strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
     strncpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
 
-    // 根據是否有密碼自動選擇最低安全模式
     if (strlen(password) == 0)
     {
         wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
@@ -145,7 +154,6 @@ bool wifi_connect(const char *ssid, const char *password)
         wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     }
 
-    // 設定 PMF (Protected Management Frames) 增加相容性
     wifi_config.sta.pmf_cfg.capable = true;
     wifi_config.sta.pmf_cfg.required = false;
 
@@ -157,7 +165,7 @@ bool wifi_connect(const char *ssid, const char *password)
     }
 
     ret = esp_wifi_start();
-    if (ret != ESP_OK)
+    if (ret != ESP_OK && ret != ESP_ERR_WIFI_CONN)
     {
         ESP_LOGE(TAG, "啟動 WIFI 失敗: %s", esp_err_to_name(ret));
         return false;
@@ -165,7 +173,6 @@ bool wifi_connect(const char *ssid, const char *password)
 
     ESP_LOGI(TAG, "正在連接到 WIFI: %s", ssid);
 
-    // 等待連接成功或失敗（最多 20 秒）
     EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
                                            pdFALSE,
@@ -195,6 +202,7 @@ void wifi_disconnect(void)
     {
         esp_wifi_disconnect();
         esp_wifi_stop();
+        xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
         ESP_LOGI(TAG, "WIFI 已斷開");
     }
 }
