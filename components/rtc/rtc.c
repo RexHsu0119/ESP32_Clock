@@ -1,9 +1,13 @@
 #include "my_rtc.h"
-#include "esp_sntp.h"
+#include "esp_sntp.h" // 改回使用 esp_sntp.h
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include <sys/time.h>
 #include <string.h>
+
+// 新增這兩行來支援 vTaskDelay
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "RTC";
 
@@ -37,46 +41,77 @@ void rtc_sync_from_ntp(void)
 {
     ESP_LOGI(TAG, "開始從 NTP 伺服器同步時間...");
 
-    // 設置 SNTP 操作模式
+    // 0. 強制將系統本地時間設回 1970 年...
+    struct timeval tv_reset = {.tv_sec = 0, .tv_usec = 0};
+    settimeofday(&tv_reset, NULL);
+
+    // ✨ 關鍵優化 1：拿到 IP 後不要急著發送，等待路由器完全開通對外網路
+    ESP_LOGI(TAG, "等待網路路由穩定...");
+    vTaskDelay(2000 / portTICK_PERIOD_MS); // 停頓 2 秒
+
+    // 1. 初始化並設定 NTP 伺服器
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    // ✨ 補上這行：強制收到時間後「立刻精準覆蓋」，解決秒數慢的問題
+    sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
 
-    // 設置 NTP 伺服器
-    esp_sntp_setservername(0, "pool.ntp.org");
-    esp_sntp_setservername(1, "time.nist.gov");
-    esp_sntp_setservername(2, "time.google.com");
+    sntp_set_sync_interval(3600000);
 
-    // 設置時間同步通知回調
-    esp_sntp_set_time_sync_notification_cb(time_sync_notification_cb);
+    // ✨ 終極優化：將「純 IP」放到第 0 順位，徹底避開手機熱點緩慢的 DNS 解析
+    esp_sntp_setservername(0, "162.159.200.1");       // Cloudflare 時間伺服器 (純IP)
+    esp_sntp_setservername(1, "time.stdtime.gov.tw"); // 國家時間實驗室 (備用)
+    esp_sntp_setservername(2, "pool.ntp.org");        // NTP 池 (備用)
 
-    // 啟動 SNTP
+    // 3. 註冊非同步回調函數
+    sntp_set_time_sync_notification_cb(time_sync_notification_cb);
+
+    // 4. 初始化
     esp_sntp_init();
 
     ESP_LOGI(TAG, "SNTP 客戶端已啟動，等待時間同步...");
 
-    // 等待時間同步（最多 30 秒）
-    int retry_count = 0;
-    const int max_retries = 30;
+    // 5. 改用「直接檢查年份」來判斷對時是否成功
+    int retry = 0;
+    const int retry_count = 90; // ✨ 若使用熱點，把耐心放大到 90 秒，避免早退
+    bool sync_success = false;
 
-    while (retry_count < max_retries)
+    while (retry < retry_count)
     {
+        // 抓取當前系統時間
         time_t now = time(NULL);
+        struct tm timeinfo = {0};
+        localtime_r(&now, &timeinfo);
 
-        // 檢查時間是否已同步（時間戳應大於 2024 年 1 月 1 日）
-        if (now > 1704067200)
+        // 如果年份大於 2026 (表示真正從小於等於2026的舊時間更新到了2027年以上的未來，或至少能確保目前不是舊時間)
+        // 更精確的作法：只要 NTP 對時成功，time_sync_notification_cb 就會被觸發
+        // 但為了防呆，我們檢查年份：1900 + timeinfo.tm_year
+        int current_year = 1900 + timeinfo.tm_year;
+
+        ESP_LOGI(TAG, "等待 NTP 同步... 當前系統年份: %d (%d/%d)", current_year, retry + 1, retry_count);
+
+        // ESP32 沒有電池時預設是 1970。您之前 NVS 存了 2026。
+        // 如果現在真實年份是 2024 / 2025，這通常表示已經更新了 (或者我們可以單純等 sntp 內部狀態)
+        // 最好的做法是：只要時間的回調函數被呼叫，就代表成功了！
+
+        if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED || current_year > 2000)
         {
-            ESP_LOGI(TAG, "NTP 同步成功");
-            rtc_save_to_nvs();
-            esp_sntp_stop();
-            return;
+            // 注意：如果您 NVS 存的是錯的 2026，這裡大於 2000 也會馬上跳出。
+            // 所以我們需要強制將系統時間先歸零到 1970！
+            sync_success = true;
+            break;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        retry_count++;
-        ESP_LOGD(TAG, "等待 NTP 同步... (%d/%d)", retry_count, max_retries);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        retry++;
     }
 
-    ESP_LOGW(TAG, "NTP 同步超時，停止 SNTP 客戶端");
-    esp_sntp_stop();
+    if (sync_success)
+    {
+        ESP_LOGI(TAG, "NTP 時間同步成功！(或已抓到合理年份)");
+    }
+    else
+    {
+        ESP_LOGW(TAG, "NTP 時間同步超時或失敗！");
+    }
 }
 
 void rtc_load_from_nvs(void)

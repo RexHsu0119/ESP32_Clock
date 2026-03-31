@@ -2,6 +2,7 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_netif.h" // 新增這行：處理網路介面
 #include "lwip/err.h"
 #include "lwip/sys.h"
 #include "freertos/FreeRTOS.h"
@@ -35,24 +36,21 @@ static void event_handler(void *arg, esp_event_base_t event_base,
             {
                 esp_wifi_connect();
                 retry_num++;
-                ESP_LOGI(TAG, "重試連接 WIFI... (%d/%d)", retry_num, MAXIMUM_RETRY);
+                ESP_LOGI(TAG, "重試連接 WIFI...");
             }
             else
             {
                 xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
-                ESP_LOGW(TAG, "WIFI 連接失敗，已達最大重試次數");
+                ESP_LOGI(TAG, "連接 WIFI 失敗");
             }
         }
     }
-    else if (event_base == IP_EVENT)
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
-        if (event_id == IP_EVENT_STA_GOT_IP)
-        {
-            ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-            ESP_LOGI(TAG, "WIFI 連接成功，獲得 IP: " IPSTR, IP2STR(&event->ip_info.ip));
-            retry_num = 0;
-            xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
-        }
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "成功獲取 IP 位址:" IPSTR, IP2STR(&event->ip_info.ip));
+        retry_num = 0;
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT); // <-- 這是關鍵！
     }
 }
 
@@ -66,13 +64,11 @@ bool wifi_init(void)
 
     // 創建事件組
     wifi_event_group = xEventGroupCreate();
-    if (wifi_event_group == NULL)
-    {
-        ESP_LOGE(TAG, "創建事件組失敗");
-        return false;
-    }
 
-    // 創建默認事件迴圈
+    // 1. 初始化底層 LwIP 網路配置
+    ESP_ERROR_CHECK(esp_netif_init());
+
+    // 2. 必須先建立預設事件迴圈 (Event Loop)！
     esp_err_t ret = esp_event_loop_create_default();
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE)
     {
@@ -80,14 +76,12 @@ bool wifi_init(void)
         return false;
     }
 
-    // 初始化 WIFI
+    // 3. 建立事件迴圈後，才可以建立預設的 Wi-Fi STA 網路介面
+    esp_netif_create_default_wifi_sta();
+
+    // 4. 初始化 Wi-Fi 驅動
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ret = esp_wifi_init(&cfg);
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "WIFI 初始化失敗: %s", esp_err_to_name(ret));
-        return false;
-    }
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
     // 註冊事件處理器
     ret = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL);

@@ -14,6 +14,9 @@
 #include "display.h"
 #include "button.h"
 #include "lvgl.h"
+#include "esp_sntp.h" // 新增 SNTP 標頭檔
+#include <time.h>
+#include <sys/time.h>
 
 static const char *TAG = "MAIN";
 
@@ -135,6 +138,7 @@ void app_main(void)
     // 等待 WIFI 連接並同步時間
     ESP_LOGI(TAG, "嘗試通過 WIFI 同步時間...");
     if (wifi_connect("RexHsu", "0933356554"))
+    // if (wifi_connect("GGININDER_24G_5G", "9876543210"))
     {
         ESP_LOGI(TAG, "WIFI 連接成功，正在同步時間...");
         rtc_sync_from_ntp();
@@ -143,6 +147,19 @@ void app_main(void)
     {
         ESP_LOGW(TAG, "WIFI 連接失敗，使用本地時間");
     }
+
+    // --- 請在這裡加入時區設定 ---
+    ESP_LOGI(TAG, "設定本地時區為 UTC+8 (台灣時間)");
+    setenv("TZ", "CST-8", 1);
+    tzset();
+
+    // --- 加入除錯訊息：印出當前系統時間 ---
+    time_t debug_now = time(NULL);
+    struct tm *debug_tm_info = localtime(&debug_now);
+    char debug_time_str[64];
+    strftime(debug_time_str, sizeof(debug_time_str), "%Y-%m-%d %H:%M:%S", debug_tm_info);
+    ESP_LOGW(TAG, "【除錯】連線與對時後，系統現在的時間為: %s", debug_time_str);
+    // ------------------------------------
 
     // 初始化 LVGL Timer
     const esp_timer_create_args_t tick_timer_args = {.callback = lvgl_tick_cb, .name = "lvgl_tick"};
