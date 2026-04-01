@@ -8,6 +8,9 @@
 #define BUTTON_DOWN 39
 #define BUTTON_CENTER 0
 
+// 組合鍵虛擬 ID
+#define BUTTON_COMBO_UP_DOWN 100
+
 // 按鈕事件類型
 #define BUTTON_SHORT_PRESS 0
 #define BUTTON_LONG_PRESS 1

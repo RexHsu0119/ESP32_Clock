@@ -1,4 +1,7 @@
 #include "wifi.h"
+
+#include <string.h>
+
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -8,11 +11,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
-#include <string.h>
 
 static const char *TAG = "WIFI";
 
-// 事件組用於 WIFI 連接狀態
+/* 事件組用於 WIFI 連接狀態 */
 static EventGroupHandle_t wifi_event_group = NULL;
 static const int WIFI_CONNECTED_BIT = BIT0;
 static const int WIFI_FAIL_BIT = BIT1;
@@ -20,6 +22,7 @@ static const int WIFI_FAIL_BIT = BIT1;
 static int retry_num = 0;
 static const int MAXIMUM_RETRY = 5;
 static bool wifi_initialized = false;
+static bool wifi_started = false;
 
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
@@ -35,7 +38,14 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         }
         else if (event_id == WIFI_EVENT_STA_DISCONNECTED)
         {
+            wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
+
             xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
+
+            if (event != NULL)
+            {
+                ESP_LOGW(TAG, "WIFI 斷線，reason=%d", event->reason);
+            }
 
             if (retry_num < MAXIMUM_RETRY)
             {
@@ -46,7 +56,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
             else
             {
                 xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
-                ESP_LOGI(TAG, "連接 WIFI 失敗");
+                ESP_LOGW(TAG, "連接 WIFI 失敗，已達最大重試次數");
             }
         }
     }
@@ -56,7 +66,11 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "成功獲取 IP 位址:" IPSTR, IP2STR(&event->ip_info.ip));
 
         /* 關閉 Wi-Fi Power Save，減少 NTP/UDP 封包延遲 */
-        esp_wifi_set_ps(WIFI_PS_NONE);
+        esp_err_t ret = esp_wifi_set_ps(WIFI_PS_NONE);
+        if (ret != ESP_OK)
+        {
+            ESP_LOGW(TAG, "關閉 Wi-Fi Power Save 失敗: %s", esp_err_to_name(ret));
+        }
 
         retry_num = 0;
         xEventGroupClearBits(wifi_event_group, WIFI_FAIL_BIT);
@@ -96,6 +110,14 @@ bool wifi_init(void)
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    /* 使用 RAM 儲存 Wi-Fi 配置，減少不必要 NVS 交互 */
+    ret = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "設置 WIFI storage 失敗: %s", esp_err_to_name(ret));
+        return false;
+    }
 
     ret = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL);
     if (ret != ESP_OK)
@@ -151,11 +173,18 @@ bool wifi_connect(const char *ssid, const char *password)
     }
     else
     {
-        wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+        /* 您目前 AP 看起來會走 WPA3-SAE，
+         * 這裡改成 WPA2/WPA3 轉換模式比較合適
+         */
+        wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_WPA3_PSK;
     }
 
     wifi_config.sta.pmf_cfg.capable = true;
     wifi_config.sta.pmf_cfg.required = false;
+
+#if CONFIG_ESP_WIFI_ENABLE_WPA3_SAE
+    wifi_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+#endif
 
     esp_err_t ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     if (ret != ESP_OK)
@@ -164,11 +193,30 @@ bool wifi_connect(const char *ssid, const char *password)
         return false;
     }
 
-    ret = esp_wifi_start();
-    if (ret != ESP_OK && ret != ESP_ERR_WIFI_CONN)
+    if (!wifi_started)
     {
-        ESP_LOGE(TAG, "啟動 WIFI 失敗: %s", esp_err_to_name(ret));
-        return false;
+        ret = esp_wifi_start();
+        if (ret != ESP_OK && ret != ESP_ERR_WIFI_CONN)
+        {
+            ESP_LOGE(TAG, "啟動 WIFI 失敗: %s", esp_err_to_name(ret));
+            return false;
+        }
+        wifi_started = true;
+    }
+    else
+    {
+        ret = esp_wifi_disconnect();
+        if (ret != ESP_OK && ret != ESP_ERR_WIFI_NOT_CONNECT)
+        {
+            ESP_LOGW(TAG, "中斷舊連線失敗: %s", esp_err_to_name(ret));
+        }
+
+        ret = esp_wifi_connect();
+        if (ret != ESP_OK)
+        {
+            ESP_LOGE(TAG, "重新發起 WIFI 連接失敗: %s", esp_err_to_name(ret));
+            return false;
+        }
     }
 
     ESP_LOGI(TAG, "正在連接到 WIFI: %s", ssid);
@@ -201,8 +249,14 @@ void wifi_disconnect(void)
     if (wifi_initialized)
     {
         esp_wifi_disconnect();
-        esp_wifi_stop();
-        xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
+
+        if (wifi_started)
+        {
+            esp_wifi_stop();
+            wifi_started = false;
+        }
+
+        xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
         ESP_LOGI(TAG, "WIFI 已斷開");
     }
 }

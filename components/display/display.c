@@ -1,6 +1,11 @@
 #include "display.h"
 
 #include <string.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "esp_log.h"
 #include "driver/gpio.h"
@@ -22,14 +27,16 @@ static const char *TAG = "DISPLAY";
 #define LCD_Y_OFFSET 24
 
 /* 背光極性：
- * 依您目前板子的實際行為，0 看起來是亮、1 是關
+ * 依您目前板子的實際行為，1 看起來是亮、0 是關
  * 若之後發現相反，只要交換這兩個值即可
  */
 #define LCD_BL_ON_LEVEL 1
 #define LCD_BL_OFF_LEVEL 0
 
-/* 全域面板 handle */
+/* 全域狀態 */
 static esp_lcd_panel_handle_t panel_handle = NULL;
+static bool s_lvgl_inited = false;
+static bool s_display_inited = false;
 
 /* 若外部需要取得 panel handle */
 esp_lcd_panel_handle_t get_panel_handle(void)
@@ -46,7 +53,11 @@ static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
     (void)edata;
 
     lv_display_t *disp = (lv_display_t *)user_ctx;
-    lv_display_flush_ready(disp);
+    if (disp != NULL)
+    {
+        lv_display_flush_ready(disp);
+    }
+
     return false;
 }
 
@@ -56,7 +67,16 @@ static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
  */
 static void display_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
-    (void)disp;
+    if (disp == NULL || area == NULL || px_map == NULL)
+    {
+        return;
+    }
+
+    if (panel_handle == NULL)
+    {
+        lv_display_flush_ready(disp);
+        return;
+    }
 
     int offset_x1 = area->x1 + LCD_X_OFFSET;
     int offset_y1 = area->y1 + LCD_Y_OFFSET;
@@ -79,7 +99,17 @@ static void display_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
 /* 初始化 LVGL 與 display driver 綁定 */
 void display_lvgl_init(esp_lcd_panel_io_handle_t io_handle)
 {
-    lv_init();
+    if (io_handle == NULL)
+    {
+        ESP_LOGE(TAG, "io_handle 為 NULL，無法初始化 LVGL display");
+        return;
+    }
+
+    if (!s_lvgl_inited)
+    {
+        lv_init();
+        s_lvgl_inited = true;
+    }
 
     lv_display_t *disp = lv_display_create(DISPLAY_WIDTH, DISPLAY_HEIGHT);
     if (disp == NULL)
@@ -110,11 +140,19 @@ void display_lvgl_init(esp_lcd_panel_io_handle_t io_handle)
         .on_color_trans_done = notify_lvgl_flush_ready,
     };
     ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(io_handle, &cbs, disp));
+
+    ESP_LOGI(TAG, "LVGL display 初始化完成");
 }
 
 /* 初始化顯示器 */
 void display_init(void)
 {
+    if (s_display_inited)
+    {
+        ESP_LOGW(TAG, "display 已初始化，略過重複初始化");
+        return;
+    }
+
     ESP_LOGI(TAG, "開始使用 ESP_LCD 初始化 ST7735");
 
     /* 1. 初始化背光腳位，先關閉 */
@@ -162,12 +200,30 @@ void display_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
 
-    /* 6. 綁定 LVGL */
+    /* 6. 先清黑畫面，避免開機瞬間看到亂碼/雪花 */
+    {
+        static uint16_t black_line[DISPLAY_WIDTH];
+        memset(black_line, 0x00, sizeof(black_line));
+
+        for (int y = 0; y < DISPLAY_HEIGHT; y++)
+        {
+            ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle,
+                                                      0 + LCD_X_OFFSET,
+                                                      y + LCD_Y_OFFSET,
+                                                      DISPLAY_WIDTH + LCD_X_OFFSET,
+                                                      y + 1 + LCD_Y_OFFSET,
+                                                      black_line));
+        }
+    }
+
+    /* 7. 綁定 LVGL */
     display_lvgl_init(io_handle);
 
-    /* 7. 開啟背光 */
+    /* 8. 稍等一下再開背光，降低短暫雪花機率 */
+    vTaskDelay(pdMS_TO_TICKS(30));
     gpio_set_level(PIN_LCD_BL, LCD_BL_ON_LEVEL);
 
+    s_display_inited = true;
     ESP_LOGI(TAG, "顯示模組初始化完成");
 }
 

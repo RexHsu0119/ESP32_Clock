@@ -1,4 +1,8 @@
 #include "button.h"
+
+#include <inttypes.h>
+#include <stdbool.h>
+
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -7,7 +11,7 @@
 
 static const char *TAG = "BUTTON";
 
-// 按鈕狀態結構體
+/* 按鈕狀態結構體 */
 typedef struct
 {
     uint8_t gpio_num;
@@ -16,73 +20,134 @@ typedef struct
     uint8_t last_state;
 } button_state_t;
 
-// 按鈕事件結構體
+/* 按鈕事件結構體 */
 typedef struct
 {
     uint8_t button_id;
     uint8_t event_type;
 } button_event_t;
 
-// 按鈕配置
+/* 按鈕配置 */
 static button_state_t button_states[] = {
     {BUTTON_UP, BUTTON_UP, 0, 1},
     {BUTTON_DOWN, BUTTON_DOWN, 0, 1},
-    {BUTTON_CENTER, BUTTON_CENTER, 0, 1}};
+    {BUTTON_CENTER, BUTTON_CENTER, 0, 1},
+};
 
 #define BUTTON_COUNT (sizeof(button_states) / sizeof(button_states[0]))
 
-// 事件隊列和回調函數
+/* 事件隊列和回調函數 */
 static QueueHandle_t button_event_queue = NULL;
 static button_callback_t button_callback = NULL;
-static TaskHandle_t button_task_handle = NULL;
+static TaskHandle_t button_scan_task_handle = NULL;
+static TaskHandle_t button_event_task_handle = NULL;
 
-// 按鈕去抖動參數
+/* 按鈕去抖動參數 */
 #define DEBOUNCE_TIME_MS 20
 #define LONG_PRESS_TIME_MS 1000
 #define BUTTON_CHECK_INTERVAL 10
+
+#define BUTTON_SCAN_TASK_STACK_SIZE 2048
+#define BUTTON_EVENT_TASK_STACK_SIZE 4096
+
+/* 組合鍵狀態 */
+static bool combo_up_down_active = false;
 
 /**
  * @brief 按鈕掃描任務
  */
 static void button_scan_task(void *arg)
 {
+    (void)arg;
+
     ESP_LOGI(TAG, "按鈕掃描任務已啟動");
 
     while (1)
     {
+        uint8_t up_state = gpio_get_level(BUTTON_UP);
+        uint8_t down_state = gpio_get_level(BUTTON_DOWN);
+
+        /* 先處理 UP + DOWN 組合鍵 */
+        if (up_state == 0 && down_state == 0)
+        {
+            if (!combo_up_down_active)
+            {
+                combo_up_down_active = true;
+
+                button_event_t event = {
+                    .button_id = BUTTON_COMBO_UP_DOWN,
+                    .event_type = BUTTON_SHORT_PRESS};
+
+                if (xQueueSend(button_event_queue, &event, 0) != pdTRUE)
+                {
+                    ESP_LOGW(TAG, "按鈕事件隊列已滿，丟棄組合鍵事件");
+                }
+                else
+                {
+                    ESP_LOGI(TAG, "偵測到組合鍵: UP + DOWN");
+                }
+            }
+
+            /* 同時按住時，不處理個別按鍵事件 */
+            for (int i = 0; i < BUTTON_COUNT; i++)
+            {
+                button_states[i].last_state = gpio_get_level(button_states[i].gpio_num);
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(BUTTON_CHECK_INTERVAL));
+            continue;
+        }
+        else
+        {
+            combo_up_down_active = false;
+        }
+
         for (int i = 0; i < BUTTON_COUNT; i++)
         {
             button_state_t *state = &button_states[i];
             uint8_t current_state = gpio_get_level(state->gpio_num);
 
-            // 檢測按下
+            /* 檢測按下 */
             if (current_state == 0 && state->last_state == 1)
             {
                 state->press_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
                 ESP_LOGD(TAG, "按鈕 %d 按下", state->button_id);
             }
-            // 檢測釋放
+            /* 檢測釋放 */
             else if (current_state == 1 && state->last_state == 0)
             {
-                uint32_t press_duration = (xTaskGetTickCount() * portTICK_PERIOD_MS) - state->press_time;
+                uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                uint32_t press_duration = now_ms - state->press_time;
 
                 if (press_duration >= LONG_PRESS_TIME_MS)
                 {
-                    // 長按
                     button_event_t event = {
                         .button_id = state->button_id,
                         .event_type = BUTTON_LONG_PRESS};
-                    xQueueSend(button_event_queue, &event, 0);
-                    ESP_LOGD(TAG, "按鈕 %d 長按 (%lu ms)", state->button_id, press_duration);
+
+                    if (xQueueSend(button_event_queue, &event, 0) != pdTRUE)
+                    {
+                        ESP_LOGW(TAG, "按鈕事件隊列已滿，丟棄長按事件");
+                    }
+                    else
+                    {
+                        ESP_LOGD(TAG, "按鈕 %d 長按 (%" PRIu32 " ms)", state->button_id, press_duration);
+                    }
                 }
                 else if (press_duration >= DEBOUNCE_TIME_MS)
                 {
-                    // 短按
                     button_event_t event = {
                         .button_id = state->button_id,
                         .event_type = BUTTON_SHORT_PRESS};
-                    xQueueSend(button_event_queue, &event, 0);
-                    ESP_LOGD(TAG, "按鈕 %d 短按 (%lu ms)", state->button_id, press_duration);
+
+                    if (xQueueSend(button_event_queue, &event, 0) != pdTRUE)
+                    {
+                        ESP_LOGW(TAG, "按鈕事件隊列已滿，丟棄短按事件");
+                    }
+                    else
+                    {
+                        ESP_LOGD(TAG, "按鈕 %d 短按 (%" PRIu32 " ms)", state->button_id, press_duration);
+                    }
                 }
             }
 
@@ -98,6 +163,8 @@ static void button_scan_task(void *arg)
  */
 static void button_event_task(void *arg)
 {
+    (void)arg;
+
     ESP_LOGI(TAG, "按鈕事件處理任務已啟動");
 
     button_event_t event;
@@ -118,7 +185,6 @@ void button_init(void)
 {
     ESP_LOGI(TAG, "初始化按鈕模組...");
 
-    // 配置 GPIO 引腳
     gpio_config_t io_conf = {0};
     io_conf.pin_bit_mask = (1ULL << BUTTON_UP) | (1ULL << BUTTON_DOWN) | (1ULL << BUTTON_CENTER);
     io_conf.mode = GPIO_MODE_INPUT;
@@ -133,7 +199,6 @@ void button_init(void)
         return;
     }
 
-    // 創建事件隊列
     button_event_queue = xQueueCreate(10, sizeof(button_event_t));
     if (button_event_queue == NULL)
     {
@@ -141,16 +206,24 @@ void button_init(void)
         return;
     }
 
-    // 創建按鈕掃描任務
-    ret = xTaskCreate(button_scan_task, "button_scan", 2048, NULL, 5, &button_task_handle);
+    ret = xTaskCreate(button_scan_task,
+                      "button_scan",
+                      BUTTON_SCAN_TASK_STACK_SIZE,
+                      NULL,
+                      5,
+                      &button_scan_task_handle);
     if (ret != pdPASS)
     {
         ESP_LOGE(TAG, "創建按鈕掃描任務失敗");
         return;
     }
 
-    // 創建按鈕事件處理任務
-    ret = xTaskCreate(button_event_task, "button_event", 2048, NULL, 6, NULL);
+    ret = xTaskCreate(button_event_task,
+                      "button_event",
+                      BUTTON_EVENT_TASK_STACK_SIZE,
+                      NULL,
+                      6,
+                      &button_event_task_handle);
     if (ret != pdPASS)
     {
         ESP_LOGE(TAG, "創建按鈕事件處理任務失敗");
@@ -171,10 +244,16 @@ void button_register_callback(button_callback_t callback)
 
 void button_deinit(void)
 {
-    if (button_task_handle != NULL)
+    if (button_scan_task_handle != NULL)
     {
-        vTaskDelete(button_task_handle);
-        button_task_handle = NULL;
+        vTaskDelete(button_scan_task_handle);
+        button_scan_task_handle = NULL;
+    }
+
+    if (button_event_task_handle != NULL)
+    {
+        vTaskDelete(button_event_task_handle);
+        button_event_task_handle = NULL;
     }
 
     if (button_event_queue != NULL)

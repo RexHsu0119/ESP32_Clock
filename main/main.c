@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <time.h>
 #include <sys/time.h>
+#include <math.h>
+#include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -24,13 +26,52 @@ static const char *TAG = "MAIN";
 static const char *WIFI_SSID = "RexHsu";
 static const char *WIFI_PASSWORD = "0933356554";
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+typedef enum
+{
+    PANEL_DIGITAL = 0,
+    PANEL_ANALOG,
+} clock_panel_t;
+
+typedef enum
+{
+    SET_FIELD_HOUR = 0,
+    SET_FIELD_MINUTE,
+    SET_FIELD_SECOND,
+} time_set_field_t;
+
 static bool is_setting_time = false;
 static struct tm time_setting = {0};
-static int current_panel = 0;
+static clock_panel_t current_panel = PANEL_DIGITAL;
+static time_set_field_t current_set_field = SET_FIELD_HOUR;
 
-/* 全局 LVGL 標籤 */
-static lv_obj_t *time_label = NULL;
+/* LVGL 物件 */
+static lv_obj_t *digital_container = NULL;
+static lv_obj_t *analog_container = NULL;
 static lv_obj_t *status_label = NULL;
+
+/* 數位時鐘拆成固定位置元件，避免左右漂移 */
+static lv_obj_t *hour_label = NULL;
+static lv_obj_t *minute_label = NULL;
+static lv_obj_t *second_label = NULL;
+static lv_obj_t *colon1_label = NULL;
+static lv_obj_t *colon2_label = NULL;
+
+static lv_obj_t *analog_face = NULL;
+static lv_obj_t *hour_hand = NULL;
+static lv_obj_t *minute_hand = NULL;
+static lv_obj_t *second_hand = NULL;
+static lv_obj_t *center_dot = NULL;
+static lv_obj_t *tick_marks[12] = {0};
+
+/* 類比時鐘線段點 */
+static lv_point_precise_t hour_points[2];
+static lv_point_precise_t minute_points[2];
+static lv_point_precise_t second_points[2];
+static lv_point_precise_t tick_points[12][2];
 
 /* LVGL 互斥鎖 */
 static SemaphoreHandle_t lvgl_mutex = NULL;
@@ -39,11 +80,442 @@ static SemaphoreHandle_t lvgl_mutex = NULL;
 static volatile bool g_time_syncing = false;
 static volatile bool g_wifi_failed = false;
 
+/* forward declarations */
+static void lvgl_task(void *arg);
+static void network_time_task(void *arg);
+
+/* 類比時鐘尺寸 */
+#define ANALOG_FACE_SIZE 64
+#define ANALOG_CENTER_X (ANALOG_FACE_SIZE / 2)
+#define ANALOG_CENTER_Y (ANALOG_FACE_SIZE / 2)
+#define HOUR_HAND_LEN 16
+#define MINUTE_HAND_LEN 22
+#define SECOND_HAND_LEN 26
+
+/* LVGL UI 更新週期 */
+#define UI_UPDATE_PERIOD_MS 500
+#define SETTING_BLINK_PERIOD_US 500000LL
+
+/* 數位時鐘固定欄位寬度 */
+#define DIGIT_FIELD_WIDTH 40
+#define COLON_FIELD_WIDTH 10
+
 /* LVGL 的時間滴答 */
 static void lvgl_tick_cb(void *arg)
 {
     (void)arg;
     lv_tick_inc(2);
+}
+
+static const char *get_setting_status_text(void)
+{
+    switch (current_set_field)
+    {
+    case SET_FIELD_HOUR:
+        return "Set Hour";
+    case SET_FIELD_MINUTE:
+        return "Set Minute";
+    case SET_FIELD_SECOND:
+        return "Set Second";
+    default:
+        return "Setting";
+    }
+}
+
+static void update_panel_visibility(void)
+{
+    if (digital_container != NULL)
+    {
+        if (current_panel == PANEL_DIGITAL)
+        {
+            lv_obj_clear_flag(digital_container, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_add_flag(digital_container, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    if (analog_container != NULL)
+    {
+        if (current_panel == PANEL_ANALOG)
+        {
+            lv_obj_clear_flag(analog_container, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_add_flag(analog_container, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void create_analog_ticks(void)
+{
+    if (analog_face == NULL)
+    {
+        return;
+    }
+
+    const int outer_r = (ANALOG_FACE_SIZE / 2) - 3;
+
+    for (int i = 0; i < 12; i++)
+    {
+        int inner_r;
+        int line_width;
+
+        /* 12 / 3 / 6 / 9 點位置畫長一點、粗一點 */
+        if (i % 3 == 0)
+        {
+            inner_r = outer_r - 8;
+            line_width = 3;
+        }
+        else
+        {
+            inner_r = outer_r - 5;
+            line_width = 2;
+        }
+
+        float rad = (float)(i * 30 - 90) * (float)M_PI / 180.0f;
+
+        int x1 = ANALOG_CENTER_X + (int)(cosf(rad) * inner_r);
+        int y1 = ANALOG_CENTER_Y + (int)(sinf(rad) * inner_r);
+        int x2 = ANALOG_CENTER_X + (int)(cosf(rad) * outer_r);
+        int y2 = ANALOG_CENTER_Y + (int)(sinf(rad) * outer_r);
+
+        tick_points[i][0].x = x1;
+        tick_points[i][0].y = y1;
+        tick_points[i][1].x = x2;
+        tick_points[i][1].y = y2;
+
+        tick_marks[i] = lv_line_create(analog_face);
+        lv_obj_set_style_line_width(tick_marks[i], line_width, 0);
+        lv_obj_set_style_line_color(tick_marks[i], lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_line_rounded(tick_marks[i], true, 0);
+        lv_line_set_points(tick_marks[i], tick_points[i], 2);
+    }
+}
+
+static void update_hand_points(lv_obj_t *line,
+                               lv_point_precise_t points[2],
+                               int angle_deg,
+                               int length)
+{
+    float rad = (float)(angle_deg - 90) * (float)M_PI / 180.0f;
+
+    int end_x = ANALOG_CENTER_X + (int)(cosf(rad) * length);
+    int end_y = ANALOG_CENTER_Y + (int)(sinf(rad) * length);
+
+    points[0].x = ANALOG_CENTER_X;
+    points[0].y = ANALOG_CENTER_Y;
+    points[1].x = end_x;
+    points[1].y = end_y;
+
+    lv_line_set_points(line, points, 2);
+}
+
+static void update_analog_clock(const struct tm *t)
+{
+    if (hour_hand == NULL || minute_hand == NULL || second_hand == NULL)
+    {
+        return;
+    }
+
+    int hour_angle = (t->tm_hour % 12) * 30 + (t->tm_min / 2);
+    int minute_angle = t->tm_min * 6;
+    int second_angle = t->tm_sec * 6;
+
+    update_hand_points(hour_hand, hour_points, hour_angle, HOUR_HAND_LEN);
+    update_hand_points(minute_hand, minute_points, minute_angle, MINUTE_HAND_LEN);
+    update_hand_points(second_hand, second_points, second_angle, SECOND_HAND_LEN);
+}
+
+static void set_field_text(lv_obj_t *label, int value, bool visible)
+{
+    if (label == NULL)
+    {
+        return;
+    }
+
+    if (visible)
+    {
+        lv_label_set_text_fmt(label, "%02d", value);
+    }
+    else
+    {
+        lv_label_set_text(label, "  ");
+    }
+}
+
+static void set_digital_time_text(const struct tm *t)
+{
+    if (t == NULL)
+    {
+        return;
+    }
+
+    bool blink_on = true;
+
+    if (is_setting_time)
+    {
+        blink_on = ((esp_timer_get_time() / SETTING_BLINK_PERIOD_US) % 2) == 0;
+    }
+
+    bool show_hour = true;
+    bool show_min = true;
+    bool show_sec = true;
+
+    if (is_setting_time && !blink_on)
+    {
+        switch (current_set_field)
+        {
+        case SET_FIELD_HOUR:
+            show_hour = false;
+            break;
+        case SET_FIELD_MINUTE:
+            show_min = false;
+            break;
+        case SET_FIELD_SECOND:
+            show_sec = false;
+            break;
+        }
+    }
+
+    set_field_text(hour_label, t->tm_hour, show_hour);
+    set_field_text(minute_label, t->tm_min, show_min);
+    set_field_text(second_label, t->tm_sec, show_sec);
+}
+
+static void enter_time_setting_mode(void)
+{
+    time_t now = time(NULL);
+
+    if (localtime_r(&now, &time_setting) == NULL)
+    {
+        ESP_LOGW(TAG, "讀取目前系統時間失敗");
+        time_setting = (struct tm){0};
+    }
+
+    is_setting_time = true;
+    current_set_field = SET_FIELD_HOUR;
+    current_panel = PANEL_DIGITAL;
+    ESP_LOGI(TAG, "進入時間設置模式");
+}
+
+static void save_time_setting_and_exit(void)
+{
+    time_setting.tm_isdst = -1;
+
+    time_t new_time = mktime(&time_setting);
+    if (new_time != (time_t)-1)
+    {
+        struct timeval tv = {
+            .tv_sec = new_time,
+            .tv_usec = 0};
+        settimeofday(&tv, NULL);
+        rtc_save_to_nvs();
+        ESP_LOGI(TAG, "時間設置已保存");
+    }
+    else
+    {
+        ESP_LOGE(TAG, "mktime 失敗，未保存時間");
+    }
+
+    is_setting_time = false;
+    current_set_field = SET_FIELD_HOUR;
+    current_panel = PANEL_DIGITAL;
+}
+
+static void adjust_current_field(int delta)
+{
+    switch (current_set_field)
+    {
+    case SET_FIELD_HOUR:
+        time_setting.tm_hour = (time_setting.tm_hour + delta + 24) % 24;
+        ESP_LOGI(TAG, "設定小時: %d", time_setting.tm_hour);
+        break;
+
+    case SET_FIELD_MINUTE:
+        time_setting.tm_min = (time_setting.tm_min + delta + 60) % 60;
+        ESP_LOGI(TAG, "設定分鐘: %d", time_setting.tm_min);
+        break;
+
+    case SET_FIELD_SECOND:
+        time_setting.tm_sec = (time_setting.tm_sec + delta + 60) % 60;
+        ESP_LOGI(TAG, "設定秒鐘: %d", time_setting.tm_sec);
+        break;
+    }
+}
+
+static void advance_setting_field(void)
+{
+    switch (current_set_field)
+    {
+    case SET_FIELD_HOUR:
+        current_set_field = SET_FIELD_MINUTE;
+        ESP_LOGI(TAG, "切換到分鐘設定");
+        break;
+
+    case SET_FIELD_MINUTE:
+        current_set_field = SET_FIELD_SECOND;
+        ESP_LOGI(TAG, "切換到秒鐘設定");
+        break;
+
+    case SET_FIELD_SECOND:
+        current_set_field = SET_FIELD_HOUR;
+        ESP_LOGI(TAG, "切換到小時設定");
+        break;
+    }
+}
+
+static void start_manual_resync(void)
+{
+    if (is_setting_time)
+    {
+        ESP_LOGI(TAG, "目前在設時模式中，忽略手動重同步要求");
+        return;
+    }
+
+    if (g_time_syncing)
+    {
+        ESP_LOGI(TAG, "目前正在同步中，忽略手動重同步要求");
+        return;
+    }
+
+    ESP_LOGI(TAG, "手動觸發 NTP 重新同步");
+
+    if (!wifi_init())
+    {
+        g_wifi_failed = true;
+        ESP_LOGW(TAG, "手動重同步失敗：WIFI 初始化失敗");
+        return;
+    }
+
+    g_time_syncing = true;
+    g_wifi_failed = false;
+
+    xTaskCreatePinnedToCore(network_time_task,
+                            "network_time_task",
+                            6144,
+                            NULL,
+                            5,
+                            NULL,
+                            1);
+}
+
+static void create_digital_ui(lv_obj_t *scr)
+{
+    digital_container = lv_obj_create(scr);
+    lv_obj_set_size(digital_container, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_center(digital_container);
+    lv_obj_set_style_bg_opa(digital_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(digital_container, 0, 0);
+    lv_obj_set_style_pad_all(digital_container, 0, 0);
+    lv_obj_clear_flag(digital_container, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *time_row = lv_obj_create(digital_container);
+    lv_obj_set_size(time_row,
+                    DIGIT_FIELD_WIDTH * 3 + COLON_FIELD_WIDTH * 2,
+                    34);
+    lv_obj_align(time_row, LV_ALIGN_CENTER, 0, -10);
+    lv_obj_set_style_bg_opa(time_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(time_row, 0, 0);
+    lv_obj_set_style_pad_all(time_row, 0, 0);
+    lv_obj_set_style_pad_column(time_row, 0, 0);
+    lv_obj_clear_flag(time_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(time_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(time_row,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    hour_label = lv_label_create(time_row);
+    lv_obj_set_width(hour_label, DIGIT_FIELD_WIDTH);
+    lv_obj_set_style_text_align(hour_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(hour_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(hour_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(hour_label, "00");
+
+    colon1_label = lv_label_create(time_row);
+    lv_obj_set_width(colon1_label, COLON_FIELD_WIDTH);
+    lv_obj_set_style_text_align(colon1_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(colon1_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(colon1_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(colon1_label, ":");
+
+    minute_label = lv_label_create(time_row);
+    lv_obj_set_width(minute_label, DIGIT_FIELD_WIDTH);
+    lv_obj_set_style_text_align(minute_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(minute_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(minute_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(minute_label, "00");
+
+    colon2_label = lv_label_create(time_row);
+    lv_obj_set_width(colon2_label, COLON_FIELD_WIDTH);
+    lv_obj_set_style_text_align(colon2_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(colon2_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(colon2_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(colon2_label, ":");
+
+    second_label = lv_label_create(time_row);
+    lv_obj_set_width(second_label, DIGIT_FIELD_WIDTH);
+    lv_obj_set_style_text_align(second_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(second_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(second_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(second_label, "00");
+}
+
+static void create_analog_ui(lv_obj_t *scr)
+{
+    analog_container = lv_obj_create(scr);
+    lv_obj_set_size(analog_container, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_center(analog_container);
+    lv_obj_set_style_bg_opa(analog_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(analog_container, 0, 0);
+    lv_obj_set_style_pad_all(analog_container, 0, 0);
+    lv_obj_clear_flag(analog_container, LV_OBJ_FLAG_SCROLLABLE);
+
+    analog_face = lv_obj_create(analog_container);
+    lv_obj_set_size(analog_face, ANALOG_FACE_SIZE, ANALOG_FACE_SIZE);
+    lv_obj_align(analog_face, LV_ALIGN_CENTER, 0, -6);
+    lv_obj_set_style_radius(analog_face, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(analog_face, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(analog_face, 2, 0);
+    lv_obj_set_style_border_color(analog_face, lv_color_white(), 0);
+    lv_obj_set_style_pad_all(analog_face, 0, 0);
+    lv_obj_clear_flag(analog_face, LV_OBJ_FLAG_SCROLLABLE);
+
+    create_analog_ticks();
+
+    hour_hand = lv_line_create(analog_face);
+    lv_obj_set_style_line_width(hour_hand, 4, 0);
+    lv_obj_set_style_line_color(hour_hand, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_line_rounded(hour_hand, true, 0);
+
+    minute_hand = lv_line_create(analog_face);
+    lv_obj_set_style_line_width(minute_hand, 3, 0);
+    lv_obj_set_style_line_color(minute_hand, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_line_rounded(minute_hand, true, 0);
+
+    second_hand = lv_line_create(analog_face);
+    lv_obj_set_style_line_width(second_hand, 2, 0);
+    lv_obj_set_style_line_color(second_hand, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_line_rounded(second_hand, true, 0);
+
+    center_dot = lv_obj_create(analog_face);
+    lv_obj_set_size(center_dot, 6, 6);
+    lv_obj_set_style_radius(center_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(center_dot, lv_color_white(), 0);
+    lv_obj_set_style_border_width(center_dot, 0, 0);
+    lv_obj_center(center_dot);
+}
+
+static void create_status_ui(lv_obj_t *scr)
+{
+    status_label = lv_label_create(scr);
+    lv_obj_set_style_text_color(status_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(status_label, "Syncing...");
+    lv_obj_align(status_label, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 
 /* 更新畫面上的時間與狀態 */
@@ -66,19 +538,16 @@ static void update_ui(void)
 
     if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
-        if (time_label != NULL)
-        {
-            lv_label_set_text_fmt(time_label, "%02d:%02d:%02d",
-                                  display_time.tm_hour,
-                                  display_time.tm_min,
-                                  display_time.tm_sec);
-        }
+        update_panel_visibility();
+
+        set_digital_time_text(&display_time);
+        update_analog_clock(&display_time);
 
         if (status_label != NULL)
         {
             if (is_setting_time)
             {
-                lv_label_set_text(status_label, "Setting Hour");
+                lv_label_set_text(status_label, get_setting_status_text());
             }
             else if (g_time_syncing)
             {
@@ -102,10 +571,14 @@ static void update_ui(void)
     }
 }
 
-/* LVGL 背景任務 */
+/* LVGL 背景任務：同時負責跑 lv_timer_handler 與固定週期更新 UI */
 static void lvgl_task(void *arg)
 {
     (void)arg;
+
+    uint32_t ui_elapsed_ms = 0;
+
+    vTaskDelay(pdMS_TO_TICKS(300));
 
     while (1)
     {
@@ -113,6 +586,13 @@ static void lvgl_task(void *arg)
         {
             lv_timer_handler();
             xSemaphoreGive(lvgl_mutex);
+        }
+
+        ui_elapsed_ms += 10;
+        if (ui_elapsed_ms >= UI_UPDATE_PERIOD_MS)
+        {
+            ui_elapsed_ms = 0;
+            update_ui();
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -124,9 +604,10 @@ static void network_time_task(void *arg)
 {
     (void)arg;
 
+    vTaskDelay(pdMS_TO_TICKS(500));
+
     g_time_syncing = true;
     g_wifi_failed = false;
-    update_ui();
 
     ESP_LOGI(TAG, "背景開始進行 Wi-Fi 與 NTP 校時");
 
@@ -142,7 +623,6 @@ static void network_time_task(void *arg)
     }
 
     g_time_syncing = false;
-    update_ui();
 
     ESP_LOGI(TAG, "背景網路校時流程結束");
     vTaskDelete(NULL);
@@ -153,85 +633,64 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
 {
     if (event_type == BUTTON_SHORT_PRESS)
     {
-        switch (button_id)
+        if (is_setting_time)
         {
-        case BUTTON_UP:
-            if (is_setting_time)
+            switch (button_id)
             {
-                time_setting.tm_hour = (time_setting.tm_hour + 1) % 24;
-                ESP_LOGI(TAG, "時間設置 - 小時: %d", time_setting.tm_hour);
-            }
-            else
-            {
-                current_panel = (current_panel + 1) % 3;
-                ESP_LOGI(TAG, "切換面板: %d", current_panel);
-            }
-            break;
+            case BUTTON_UP:
+                adjust_current_field(+1);
+                break;
 
-        case BUTTON_DOWN:
-            if (is_setting_time)
-            {
-                time_setting.tm_hour = (time_setting.tm_hour - 1 + 24) % 24;
-                ESP_LOGI(TAG, "時間設置 - 小時: %d", time_setting.tm_hour);
-            }
-            else
-            {
-                current_panel = (current_panel - 1 + 3) % 3;
-                ESP_LOGI(TAG, "切換面板: %d", current_panel);
-            }
-            break;
+            case BUTTON_DOWN:
+                adjust_current_field(-1);
+                break;
 
-        case BUTTON_CENTER:
-            break;
+            case BUTTON_CENTER:
+                advance_setting_field();
+                break;
+            }
+        }
+        else
+        {
+            switch (button_id)
+            {
+            case BUTTON_UP:
+            case BUTTON_DOWN:
+                current_panel = (current_panel == PANEL_DIGITAL) ? PANEL_ANALOG : PANEL_DIGITAL;
+                ESP_LOGI(TAG, "切換錶面: %s",
+                         (current_panel == PANEL_DIGITAL) ? "Digital" : "Analog");
+                break;
+
+            case BUTTON_COMBO_UP_DOWN:
+                start_manual_resync();
+                break;
+
+            case BUTTON_CENTER:
+                break;
+            }
         }
     }
     else if (event_type == BUTTON_LONG_PRESS)
     {
-        switch (button_id)
+        if (button_id == BUTTON_CENTER)
         {
-        case BUTTON_CENTER:
-            is_setting_time = !is_setting_time;
-
             if (!is_setting_time)
             {
-                /* 離開設定模式，保存時間 */
-                time_setting.tm_isdst = -1;
-
-                time_t new_time = mktime(&time_setting);
-                if (new_time != (time_t)-1)
+                if (current_panel == PANEL_DIGITAL)
                 {
-                    struct timeval tv = {
-                        .tv_sec = new_time,
-                        .tv_usec = 0};
-                    settimeofday(&tv, NULL);
-                    rtc_save_to_nvs();
-                    ESP_LOGI(TAG, "時間設置已保存");
+                    enter_time_setting_mode();
                 }
                 else
                 {
-                    ESP_LOGE(TAG, "mktime 失敗，未保存時間");
+                    ESP_LOGI(TAG, "目前為類比時鐘畫面，不進入設時模式");
                 }
             }
             else
             {
-                /* 進入設定模式，先載入目前系統時間 */
-                time_t now = time(NULL);
-                if (localtime_r(&now, &time_setting) != NULL)
-                {
-                    ESP_LOGI(TAG, "進入時間設置模式");
-                }
-                else
-                {
-                    ESP_LOGW(TAG, "讀取目前系統時間失敗");
-                    time_setting = (struct tm){0};
-                }
+                save_time_setting_and_exit();
             }
-            break;
         }
     }
-
-    /* 讓設定狀態與時間顯示立即更新 */
-    update_ui();
 }
 
 void app_main(void)
@@ -288,51 +747,46 @@ void app_main(void)
         lv_obj_t *scr = lv_screen_active();
         lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
 
-        time_label = lv_label_create(scr);
-        lv_obj_set_style_text_color(time_label, lv_color_hex(0xFF0000), 0);
-        lv_obj_set_style_text_font(time_label, &lv_font_montserrat_24, 0);
-        lv_obj_align(time_label, LV_ALIGN_CENTER, 0, -10);
+        create_digital_ui(scr);
+        create_analog_ui(scr);
+        create_status_ui(scr);
 
-        status_label = lv_label_create(scr);
-        lv_obj_set_style_text_color(status_label, lv_color_hex(0xAAAAAA), 0);
-        lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
-        lv_label_set_text(status_label, "Syncing...");
-        lv_obj_align(status_label, LV_ALIGN_CENTER, 0, 18);
+        update_panel_visibility();
 
         xSemaphoreGive(lvgl_mutex);
     }
 
-    /* 先顯示 NVS 載入後的時間 */
+    /* 先顯示一次 NVS 載入後的時間 */
     g_time_syncing = true;
     g_wifi_failed = false;
     update_ui();
 
-    /* 啟動 LVGL 背景任務 */
-    xTaskCreate(lvgl_task, "lvgl", 4096, NULL, 5, NULL);
-
     ESP_LOGI(TAG, "進入主迴圈");
     display_set_brightness(100);
 
-    /* 初始化 WIFI，成功後改由背景任務連線與 NTP 校時 */
+    /* 先初始化 WIFI */
     ESP_LOGI(TAG, "初始化 WIFI 模組...");
-    if (wifi_init())
-    {
-        g_time_syncing = true;
-        g_wifi_failed = false;
-        xTaskCreate(network_time_task, "network_time_task", 4096, NULL, 5, NULL);
-    }
-    else
+    bool wifi_ok = wifi_init();
+    if (!wifi_ok)
     {
         g_time_syncing = false;
         g_wifi_failed = true;
         ESP_LOGW(TAG, "WIFI 初始化失敗，使用本地/NVS時間");
-        update_ui();
     }
 
-    /* 主迴圈每0.5秒更新一次時間 */
+    /* 啟動 LVGL 背景任務，放到 CPU1 */
+    xTaskCreatePinnedToCore(lvgl_task, "lvgl", 8192, NULL, 5, NULL, 1);
+
+    /* 若 WIFI 初始化成功，再啟動背景網路校時任務，放到 CPU1 */
+    if (wifi_ok)
+    {
+        g_time_syncing = true;
+        g_wifi_failed = false;
+        xTaskCreatePinnedToCore(network_time_task, "network_time_task", 6144, NULL, 5, NULL, 1);
+    }
+
     while (1)
     {
-        update_ui();
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
