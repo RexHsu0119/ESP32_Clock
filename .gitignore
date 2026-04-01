@@ -1,2 +1,4 @@
 .svn/ 
 build/ 
+managed_components/ 
+selected_sources.txt

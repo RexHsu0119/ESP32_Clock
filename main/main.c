@@ -18,6 +18,7 @@
 #include "wifi.h"
 #include "display.h"
 #include "button.h"
+#include "weather.h"
 #include "lvgl.h"
 
 static const char *TAG = "MAIN";
@@ -29,6 +30,8 @@ static const char *WIFI_PASSWORD = "0933356554";
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+#define DEGREE_UTF8 "\xC2\xB0"
 
 typedef enum
 {
@@ -51,14 +54,21 @@ static time_set_field_t current_set_field = SET_FIELD_HOUR;
 /* LVGL 物件 */
 static lv_obj_t *digital_container = NULL;
 static lv_obj_t *analog_container = NULL;
-static lv_obj_t *status_label = NULL;
 
-/* 數位時鐘拆成固定位置元件，避免左右漂移 */
+/* 數位錶面：上方列 */
+static lv_obj_t *net_status_label = NULL;
+static lv_obj_t *date_label = NULL;
+static lv_obj_t *weekday_label = NULL;
+
+/* 數位時鐘固定位置元件 */
 static lv_obj_t *hour_label = NULL;
 static lv_obj_t *minute_label = NULL;
 static lv_obj_t *second_label = NULL;
 static lv_obj_t *colon1_label = NULL;
 static lv_obj_t *colon2_label = NULL;
+
+/* 下方天氣列 */
+static lv_obj_t *weather_label = NULL;
 
 static lv_obj_t *analog_face = NULL;
 static lv_obj_t *hour_hand = NULL;
@@ -93,7 +103,8 @@ static void network_time_task(void *arg);
 #define SECOND_HAND_LEN 26
 
 /* LVGL UI 更新週期 */
-#define UI_UPDATE_PERIOD_MS 500
+#define UI_UPDATE_PERIOD_NORMAL_MS 1000
+#define UI_UPDATE_PERIOD_SETTING_MS 500
 #define SETTING_BLINK_PERIOD_US 500000LL
 
 /* 數位時鐘固定欄位寬度 */
@@ -107,18 +118,43 @@ static void lvgl_tick_cb(void *arg)
     lv_tick_inc(2);
 }
 
-static const char *get_setting_status_text(void)
+static const char *weekday_name(int wday)
 {
-    switch (current_set_field)
+    static const char *names[] = {
+        "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+
+    if (wday < 0 || wday > 6)
     {
-    case SET_FIELD_HOUR:
-        return "Set Hour";
-    case SET_FIELD_MINUTE:
-        return "Set Minute";
-    case SET_FIELD_SECOND:
-        return "Set Second";
-    default:
-        return "Setting";
+        return "---";
+    }
+    return names[wday];
+}
+
+static const char *get_top_status_text(void)
+{
+    if (is_setting_time)
+    {
+        return "SET";
+    }
+    else if (g_time_syncing)
+    {
+        return "SYNCING";
+    }
+    else if (g_wifi_failed)
+    {
+        return "OFF";
+    }
+    else if (rtc_is_ntp_synced())
+    {
+        return "SYNCED";
+    }
+    else if (wifi_is_connected())
+    {
+        return "WIFI";
+    }
+    else
+    {
+        return "OFF";
     }
 }
 
@@ -163,7 +199,6 @@ static void create_analog_ticks(void)
         int inner_r;
         int line_width;
 
-        /* 12 / 3 / 6 / 9 點位置畫長一點、粗一點 */
         if (i % 3 == 0)
         {
             inner_r = outer_r - 8;
@@ -285,6 +320,54 @@ static void set_digital_time_text(const struct tm *t)
     set_field_text(second_label, t->tm_sec, show_sec);
 }
 
+static void set_top_info_text(const struct tm *t)
+{
+    if (t == NULL)
+    {
+        return;
+    }
+
+    if (net_status_label != NULL)
+    {
+        lv_label_set_text(net_status_label, get_top_status_text());
+    }
+
+    if (date_label != NULL)
+    {
+        lv_label_set_text_fmt(date_label, "%04d/%02d/%02d",
+                              t->tm_year + 1900,
+                              t->tm_mon + 1,
+                              t->tm_mday);
+    }
+
+    if (weekday_label != NULL)
+    {
+        lv_label_set_text(weekday_label, weekday_name(t->tm_wday));
+    }
+}
+
+static void set_weather_text(void)
+{
+    if (weather_label == NULL)
+    {
+        return;
+    }
+
+    weather_info_t info;
+    if (weather_get_info(&info) && info.valid)
+    {
+        char buf[40];
+        snprintf(buf, sizeof(buf), "%.1f" DEGREE_UTF8 "C  %d%%RH",
+                 info.temperature_c,
+                 info.humidity_percent);
+        lv_label_set_text(weather_label, buf);
+    }
+    else
+    {
+        lv_label_set_text(weather_label, "--.-" DEGREE_UTF8 "C  --%RH");
+    }
+}
+
 static void enter_time_setting_mode(void)
 {
     time_t now = time(NULL);
@@ -381,7 +464,7 @@ static void start_manual_resync(void)
         return;
     }
 
-    ESP_LOGI(TAG, "手動觸發 NTP 重新同步");
+    ESP_LOGI(TAG, "手動觸發 NTP / Weather 重新同步");
 
     if (!wifi_init())
     {
@@ -412,11 +495,51 @@ static void create_digital_ui(lv_obj_t *scr)
     lv_obj_set_style_pad_all(digital_container, 0, 0);
     lv_obj_clear_flag(digital_container, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* 上方列：狀態 / 日期 / 星期 */
+    lv_obj_t *top_row = lv_obj_create(digital_container);
+    lv_obj_set_size(top_row, DISPLAY_WIDTH - 4, 12);
+    lv_obj_align(top_row, LV_ALIGN_TOP_MID, 0, 1);
+    lv_obj_set_style_bg_opa(top_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(top_row, 0, 0);
+    lv_obj_set_style_pad_all(top_row, 0, 0);
+    lv_obj_set_style_pad_column(top_row, 0, 0);
+    lv_obj_clear_flag(top_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(top_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(top_row,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    net_status_label = lv_label_create(top_row);
+    lv_obj_set_width(net_status_label, 52);
+    lv_label_set_long_mode(net_status_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(net_status_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(net_status_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(net_status_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(net_status_label, "SYNCING");
+
+    date_label = lv_label_create(top_row);
+    lv_obj_set_width(date_label, 76);
+    lv_label_set_long_mode(date_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(date_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(date_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(date_label, &lv_font_montserrat_12, 0);
+    lv_label_set_text(date_label, "2026/03/29");
+
+    weekday_label = lv_label_create(top_row);
+    lv_obj_set_width(weekday_label, 28);
+    lv_label_set_long_mode(weekday_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(weekday_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_text_color(weekday_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(weekday_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(weekday_label, "SUN");
+
+    /* 中間大時間 */
     lv_obj_t *time_row = lv_obj_create(digital_container);
     lv_obj_set_size(time_row,
                     DIGIT_FIELD_WIDTH * 3 + COLON_FIELD_WIDTH * 2,
                     34);
-    lv_obj_align(time_row, LV_ALIGN_CENTER, 0, -10);
+    lv_obj_align(time_row, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_opa(time_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(time_row, 0, 0);
     lv_obj_set_style_pad_all(time_row, 0, 0);
@@ -462,6 +585,13 @@ static void create_digital_ui(lv_obj_t *scr)
     lv_obj_set_style_text_color(second_label, lv_color_hex(0xFF0000), 0);
     lv_obj_set_style_text_font(second_label, &lv_font_montserrat_24, 0);
     lv_label_set_text(second_label, "00");
+
+    /* 下方天氣列 */
+    weather_label = lv_label_create(digital_container);
+    lv_obj_set_style_text_color(weather_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(weather_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(weather_label, "--.-" DEGREE_UTF8 "C  --%RH");
+    lv_obj_align(weather_label, LV_ALIGN_BOTTOM_MID, 0, -2);
 }
 
 static void create_analog_ui(lv_obj_t *scr)
@@ -476,7 +606,7 @@ static void create_analog_ui(lv_obj_t *scr)
 
     analog_face = lv_obj_create(analog_container);
     lv_obj_set_size(analog_face, ANALOG_FACE_SIZE, ANALOG_FACE_SIZE);
-    lv_obj_align(analog_face, LV_ALIGN_CENTER, 0, -6);
+    lv_obj_align(analog_face, LV_ALIGN_CENTER, 0, -2);
     lv_obj_set_style_radius(analog_face, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(analog_face, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(analog_face, 2, 0);
@@ -509,16 +639,6 @@ static void create_analog_ui(lv_obj_t *scr)
     lv_obj_center(center_dot);
 }
 
-static void create_status_ui(lv_obj_t *scr)
-{
-    status_label = lv_label_create(scr);
-    lv_obj_set_style_text_color(status_label, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
-    lv_label_set_text(status_label, "Syncing...");
-    lv_obj_align(status_label, LV_ALIGN_BOTTOM_MID, 0, -4);
-}
-
-/* 更新畫面上的時間與狀態 */
 static void update_ui(void)
 {
     struct tm display_time;
@@ -540,38 +660,15 @@ static void update_ui(void)
     {
         update_panel_visibility();
 
+        set_top_info_text(&display_time);
         set_digital_time_text(&display_time);
+        set_weather_text();
         update_analog_clock(&display_time);
-
-        if (status_label != NULL)
-        {
-            if (is_setting_time)
-            {
-                lv_label_set_text(status_label, get_setting_status_text());
-            }
-            else if (g_time_syncing)
-            {
-                lv_label_set_text(status_label, "Syncing...");
-            }
-            else if (g_wifi_failed)
-            {
-                lv_label_set_text(status_label, "Offline");
-            }
-            else if (rtc_is_ntp_synced())
-            {
-                lv_label_set_text(status_label, "Synced");
-            }
-            else
-            {
-                lv_label_set_text(status_label, "");
-            }
-        }
 
         xSemaphoreGive(lvgl_mutex);
     }
 }
 
-/* LVGL 背景任務：同時負責跑 lv_timer_handler 與固定週期更新 UI */
 static void lvgl_task(void *arg)
 {
     (void)arg;
@@ -589,7 +686,11 @@ static void lvgl_task(void *arg)
         }
 
         ui_elapsed_ms += 10;
-        if (ui_elapsed_ms >= UI_UPDATE_PERIOD_MS)
+
+        uint32_t target_period = is_setting_time ? UI_UPDATE_PERIOD_SETTING_MS
+                                                 : UI_UPDATE_PERIOD_NORMAL_MS;
+
+        if (ui_elapsed_ms >= target_period)
         {
             ui_elapsed_ms = 0;
             update_ui();
@@ -599,7 +700,6 @@ static void lvgl_task(void *arg)
     }
 }
 
-/* 背景網路 + NTP 同步任務 */
 static void network_time_task(void *arg)
 {
     (void)arg;
@@ -609,12 +709,17 @@ static void network_time_task(void *arg)
     g_time_syncing = true;
     g_wifi_failed = false;
 
-    ESP_LOGI(TAG, "背景開始進行 Wi-Fi 與 NTP 校時");
+    ESP_LOGI(TAG, "背景開始進行 Wi-Fi / NTP / Weather 更新");
 
     if (wifi_connect(WIFI_SSID, WIFI_PASSWORD))
     {
         ESP_LOGI(TAG, "WIFI 連接成功，正在同步時間...");
         rtc_sync_from_ntp();
+
+        if (!weather_update_now())
+        {
+            ESP_LOGW(TAG, "天氣更新失敗");
+        }
     }
     else
     {
@@ -624,7 +729,7 @@ static void network_time_task(void *arg)
 
     g_time_syncing = false;
 
-    ESP_LOGI(TAG, "背景網路校時流程結束");
+    ESP_LOGI(TAG, "背景網路更新流程結束");
     vTaskDelete(NULL);
 }
 
@@ -729,6 +834,10 @@ void app_main(void)
     ESP_LOGI(TAG, "初始化 RTC 模組...");
     my_rtc_init();
 
+    /* 初始化 Weather */
+    ESP_LOGI(TAG, "初始化 Weather 模組...");
+    weather_init();
+
     /* 先從 NVS 載入上次時間 */
     ESP_LOGI(TAG, "從 NVS 載入上次的時間...");
     rtc_load_from_nvs();
@@ -749,8 +858,6 @@ void app_main(void)
 
         create_digital_ui(scr);
         create_analog_ui(scr);
-        create_status_ui(scr);
-
         update_panel_visibility();
 
         xSemaphoreGive(lvgl_mutex);
@@ -777,7 +884,7 @@ void app_main(void)
     /* 啟動 LVGL 背景任務，放到 CPU1 */
     xTaskCreatePinnedToCore(lvgl_task, "lvgl", 8192, NULL, 5, NULL, 1);
 
-    /* 若 WIFI 初始化成功，再啟動背景網路校時任務，放到 CPU1 */
+    /* 若 WIFI 初始化成功，再啟動背景網路更新任務，放到 CPU1 */
     if (wifi_ok)
     {
         g_time_syncing = true;
