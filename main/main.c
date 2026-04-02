@@ -67,8 +67,17 @@ static lv_obj_t *second_label = NULL;
 static lv_obj_t *colon1_label = NULL;
 static lv_obj_t *colon2_label = NULL;
 
-/* 下方天氣列 */
+/* 數位錶面：下方資訊列 */
 static lv_obj_t *weather_label = NULL;
+
+/* 類比錶面：上方列 */
+static lv_obj_t *analog_status_label = NULL;
+static lv_obj_t *analog_date_label = NULL;
+static lv_obj_t *analog_weekday_label = NULL;
+
+/* 類比錶面：右側資訊 */
+static lv_obj_t *analog_temp_label = NULL;
+static lv_obj_t *analog_humidity_label = NULL;
 
 static lv_obj_t *analog_face = NULL;
 static lv_obj_t *hour_hand = NULL;
@@ -93,6 +102,7 @@ static volatile bool g_wifi_failed = false;
 /* forward declarations */
 static void lvgl_task(void *arg);
 static void network_time_task(void *arg);
+static void update_ui(void);
 
 /* 類比時鐘尺寸 */
 #define ANALOG_FACE_SIZE 64
@@ -111,6 +121,14 @@ static void network_time_task(void *arg);
 #define DIGIT_FIELD_WIDTH 40
 #define COLON_FIELD_WIDTH 10
 
+/* 類比錶面方案 A：左邊時鐘，右邊溫濕度 */
+#define ANALOG_FACE_X 6
+#define ANALOG_FACE_Y 16
+#define ANALOG_INFO_X 86
+#define ANALOG_INFO_TEMP_Y 30
+#define ANALOG_INFO_HUMI_Y 52
+#define ANALOG_INFO_WIDTH 68
+
 /* LVGL 的時間滴答 */
 static void lvgl_tick_cb(void *arg)
 {
@@ -128,6 +146,21 @@ static const char *weekday_name(int wday)
         return "---";
     }
     return names[wday];
+}
+
+static const char *get_setting_status_text(void)
+{
+    switch (current_set_field)
+    {
+    case SET_FIELD_HOUR:
+        return "Set Hour";
+    case SET_FIELD_MINUTE:
+        return "Set Minute";
+    case SET_FIELD_SECOND:
+        return "Set Second";
+    default:
+        return "Setting";
+    }
 }
 
 static const char *get_top_status_text(void)
@@ -320,51 +353,200 @@ static void set_digital_time_text(const struct tm *t)
     set_field_text(second_label, t->tm_sec, show_sec);
 }
 
-static void set_top_info_text(const struct tm *t)
+static void set_top_info_row(lv_obj_t *status_obj,
+                             lv_obj_t *date_obj,
+                             lv_obj_t *weekday_obj,
+                             const struct tm *t)
 {
     if (t == NULL)
     {
         return;
     }
 
-    if (net_status_label != NULL)
+    if (status_obj != NULL)
     {
-        lv_label_set_text(net_status_label, get_top_status_text());
+        lv_label_set_text(status_obj, get_top_status_text());
     }
 
-    if (date_label != NULL)
+    if (date_obj != NULL)
     {
-        lv_label_set_text_fmt(date_label, "%04d/%02d/%02d",
+        lv_label_set_text_fmt(date_obj, "%04d/%02d/%02d",
                               t->tm_year + 1900,
                               t->tm_mon + 1,
                               t->tm_mday);
     }
 
-    if (weekday_label != NULL)
+    if (weekday_obj != NULL)
     {
-        lv_label_set_text(weekday_label, weekday_name(t->tm_wday));
+        lv_label_set_text(weekday_obj, weekday_name(t->tm_wday));
     }
+}
+
+static void set_top_info_unknown(lv_obj_t *status_obj,
+                                 lv_obj_t *date_obj,
+                                 lv_obj_t *weekday_obj)
+{
+    if (status_obj != NULL)
+    {
+        lv_label_set_text(status_obj, get_top_status_text());
+    }
+
+    if (date_obj != NULL)
+    {
+        lv_label_set_text(date_obj, "__/__/__");
+    }
+
+    if (weekday_obj != NULL)
+    {
+        lv_label_set_text(weekday_obj, "__");
+    }
+}
+
+static void set_digital_time_unknown(void)
+{
+    if (hour_label != NULL)
+    {
+        lv_label_set_text(hour_label, "__");
+    }
+    if (minute_label != NULL)
+    {
+        lv_label_set_text(minute_label, "__");
+    }
+    if (second_label != NULL)
+    {
+        lv_label_set_text(second_label, "__");
+    }
+}
+
+static void set_analog_clock_visible(bool visible)
+{
+    if (hour_hand != NULL)
+    {
+        if (visible)
+            lv_obj_clear_flag(hour_hand, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(hour_hand, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (minute_hand != NULL)
+    {
+        if (visible)
+            lv_obj_clear_flag(minute_hand, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(minute_hand, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (second_hand != NULL)
+    {
+        if (visible)
+            lv_obj_clear_flag(second_hand, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(second_hand, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (center_dot != NULL)
+    {
+        if (visible)
+            lv_obj_clear_flag(center_dot, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(center_dot, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static bool has_valid_display_time(void)
+{
+    if (is_setting_time)
+    {
+        return true;
+    }
+
+    if (g_time_syncing)
+    {
+        return false;
+    }
+
+    return rtc_is_ntp_synced();
 }
 
 static void set_weather_text(void)
 {
-    if (weather_label == NULL)
+    weather_info_t info;
+    char buf[40];
+
+    if (weather_label != NULL)
     {
+        if (is_setting_time)
+        {
+            lv_obj_set_style_text_color(weather_label, lv_color_hex(0xAAAAAA), 0);
+            lv_label_set_text(weather_label, get_setting_status_text());
+            return;
+        }
+        else
+        {
+            lv_obj_set_style_text_color(weather_label, lv_color_hex(0x00FFCC), 0);
+        }
+    }
+
+    if (g_time_syncing)
+    {
+        if (weather_label != NULL)
+        {
+            lv_label_set_text(weather_label, "__" DEGREE_UTF8 "C  __%RH");
+        }
+
+        if (analog_temp_label != NULL)
+        {
+            lv_label_set_text(analog_temp_label, "__" DEGREE_UTF8 "C");
+        }
+
+        if (analog_humidity_label != NULL)
+        {
+            lv_label_set_text(analog_humidity_label, "__%RH");
+        }
+
         return;
     }
 
-    weather_info_t info;
     if (weather_get_info(&info) && info.valid)
     {
-        char buf[40];
-        snprintf(buf, sizeof(buf), "%.1f" DEGREE_UTF8 "C  %d%%RH",
-                 info.temperature_c,
-                 info.humidity_percent);
-        lv_label_set_text(weather_label, buf);
+        if (weather_label != NULL)
+        {
+            snprintf(buf, sizeof(buf), "%.1f" DEGREE_UTF8 "C  %d%%RH",
+                     info.temperature_c,
+                     info.humidity_percent);
+            lv_label_set_text(weather_label, buf);
+        }
+
+        if (analog_temp_label != NULL)
+        {
+            snprintf(buf, sizeof(buf), "%.1f" DEGREE_UTF8 "C",
+                     info.temperature_c);
+            lv_label_set_text(analog_temp_label, buf);
+        }
+
+        if (analog_humidity_label != NULL)
+        {
+            snprintf(buf, sizeof(buf), "%d%%RH",
+                     info.humidity_percent);
+            lv_label_set_text(analog_humidity_label, buf);
+        }
     }
     else
     {
-        lv_label_set_text(weather_label, "--.-" DEGREE_UTF8 "C  --%RH");
+        if (weather_label != NULL)
+        {
+            lv_label_set_text(weather_label, "__" DEGREE_UTF8 "C  __%RH");
+        }
+
+        if (analog_temp_label != NULL)
+        {
+            lv_label_set_text(analog_temp_label, "__" DEGREE_UTF8 "C");
+        }
+
+        if (analog_humidity_label != NULL)
+        {
+            lv_label_set_text(analog_humidity_label, "__%RH");
+        }
     }
 }
 
@@ -476,9 +658,12 @@ static void start_manual_resync(void)
     g_time_syncing = true;
     g_wifi_failed = false;
 
+    /* 立刻更新 UI，讓時間/天氣立即顯示未知 */
+    update_ui();
+
     xTaskCreatePinnedToCore(network_time_task,
                             "network_time_task",
-                            6144,
+                            8192,
                             NULL,
                             5,
                             NULL,
@@ -586,11 +771,11 @@ static void create_digital_ui(lv_obj_t *scr)
     lv_obj_set_style_text_font(second_label, &lv_font_montserrat_24, 0);
     lv_label_set_text(second_label, "00");
 
-    /* 下方天氣列 */
+    /* 下方資訊列 */
     weather_label = lv_label_create(digital_container);
     lv_obj_set_style_text_color(weather_label, lv_color_hex(0x00FFCC), 0);
     lv_obj_set_style_text_font(weather_label, &lv_font_montserrat_14, 0);
-    lv_label_set_text(weather_label, "--.-" DEGREE_UTF8 "C  --%RH");
+    lv_label_set_text(weather_label, "__" DEGREE_UTF8 "C  __%RH");
     lv_obj_align(weather_label, LV_ALIGN_BOTTOM_MID, 0, -2);
 }
 
@@ -604,9 +789,49 @@ static void create_analog_ui(lv_obj_t *scr)
     lv_obj_set_style_pad_all(analog_container, 0, 0);
     lv_obj_clear_flag(analog_container, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* 上方列：狀態 / 日期 / 星期，不與時鐘重疊 */
+    lv_obj_t *top_row = lv_obj_create(analog_container);
+    lv_obj_set_size(top_row, DISPLAY_WIDTH - 4, 12);
+    lv_obj_align(top_row, LV_ALIGN_TOP_MID, 0, 1);
+    lv_obj_set_style_bg_opa(top_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(top_row, 0, 0);
+    lv_obj_set_style_pad_all(top_row, 0, 0);
+    lv_obj_set_style_pad_column(top_row, 0, 0);
+    lv_obj_clear_flag(top_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(top_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(top_row,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    analog_status_label = lv_label_create(top_row);
+    lv_obj_set_width(analog_status_label, 52);
+    lv_label_set_long_mode(analog_status_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(analog_status_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(analog_status_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(analog_status_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(analog_status_label, "SYNCING");
+
+    analog_date_label = lv_label_create(top_row);
+    lv_obj_set_width(analog_date_label, 76);
+    lv_label_set_long_mode(analog_date_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(analog_date_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(analog_date_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(analog_date_label, &lv_font_montserrat_12, 0);
+    lv_label_set_text(analog_date_label, "2026/03/29");
+
+    analog_weekday_label = lv_label_create(top_row);
+    lv_obj_set_width(analog_weekday_label, 28);
+    lv_label_set_long_mode(analog_weekday_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(analog_weekday_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_text_color(analog_weekday_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(analog_weekday_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(analog_weekday_label, "SUN");
+
+    /* 左側時鐘：維持原本形狀，不與上方列重疊 */
     analog_face = lv_obj_create(analog_container);
     lv_obj_set_size(analog_face, ANALOG_FACE_SIZE, ANALOG_FACE_SIZE);
-    lv_obj_align(analog_face, LV_ALIGN_CENTER, 0, -2);
+    lv_obj_set_pos(analog_face, ANALOG_FACE_X, ANALOG_FACE_Y);
     lv_obj_set_style_radius(analog_face, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(analog_face, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(analog_face, 2, 0);
@@ -637,22 +862,45 @@ static void create_analog_ui(lv_obj_t *scr)
     lv_obj_set_style_bg_color(center_dot, lv_color_white(), 0);
     lv_obj_set_style_border_width(center_dot, 0, 0);
     lv_obj_center(center_dot);
+
+    /* 右側只放溫度與濕度 */
+    analog_temp_label = lv_label_create(analog_container);
+    lv_obj_set_width(analog_temp_label, ANALOG_INFO_WIDTH);
+    lv_label_set_long_mode(analog_temp_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(analog_temp_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(analog_temp_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(analog_temp_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(analog_temp_label, "__" DEGREE_UTF8 "C");
+    lv_obj_set_pos(analog_temp_label, ANALOG_INFO_X, ANALOG_INFO_TEMP_Y);
+
+    analog_humidity_label = lv_label_create(analog_container);
+    lv_obj_set_width(analog_humidity_label, ANALOG_INFO_WIDTH);
+    lv_label_set_long_mode(analog_humidity_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(analog_humidity_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(analog_humidity_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(analog_humidity_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(analog_humidity_label, "__%RH");
+    lv_obj_set_pos(analog_humidity_label, ANALOG_INFO_X, ANALOG_INFO_HUMI_Y);
 }
 
 static void update_ui(void)
 {
     struct tm display_time;
+    bool valid_time = has_valid_display_time();
 
-    if (is_setting_time)
+    if (valid_time)
     {
-        display_time = time_setting;
-    }
-    else
-    {
-        time_t now = time(NULL);
-        if (localtime_r(&now, &display_time) == NULL)
+        if (is_setting_time)
         {
-            return;
+            display_time = time_setting;
+        }
+        else
+        {
+            time_t now = time(NULL);
+            if (localtime_r(&now, &display_time) == NULL)
+            {
+                return;
+            }
         }
     }
 
@@ -660,10 +908,25 @@ static void update_ui(void)
     {
         update_panel_visibility();
 
-        set_top_info_text(&display_time);
-        set_digital_time_text(&display_time);
+        if (valid_time)
+        {
+            set_top_info_row(net_status_label, date_label, weekday_label, &display_time);
+            set_top_info_row(analog_status_label, analog_date_label, analog_weekday_label, &display_time);
+            set_digital_time_text(&display_time);
+
+            set_analog_clock_visible(true);
+            update_analog_clock(&display_time);
+        }
+        else
+        {
+            set_top_info_unknown(net_status_label, date_label, weekday_label);
+            set_top_info_unknown(analog_status_label, analog_date_label, analog_weekday_label);
+
+            set_digital_time_unknown();
+            set_analog_clock_visible(false);
+        }
+
         set_weather_text();
-        update_analog_clock(&display_time);
 
         xSemaphoreGive(lvgl_mutex);
     }
@@ -716,6 +979,9 @@ static void network_time_task(void *arg)
         ESP_LOGI(TAG, "WIFI 連接成功，正在同步時間...");
         rtc_sync_from_ntp();
 
+        /* 等網路與 SNTP 狀態更穩定後再抓天氣 */
+        vTaskDelay(pdMS_TO_TICKS(800));
+
         if (!weather_update_now())
         {
             ESP_LOGW(TAG, "天氣更新失敗");
@@ -728,6 +994,9 @@ static void network_time_task(void *arg)
     }
 
     g_time_syncing = false;
+
+    /* 同步結束後立即刷新畫面 */
+    update_ui();
 
     ESP_LOGI(TAG, "背景網路更新流程結束");
     vTaskDelete(NULL);
@@ -838,7 +1107,7 @@ void app_main(void)
     ESP_LOGI(TAG, "初始化 Weather 模組...");
     weather_init();
 
-    /* 先從 NVS 載入上次時間 */
+    /* 先從 NVS 載入上次的時間 */
     ESP_LOGI(TAG, "從 NVS 載入上次的時間...");
     rtc_load_from_nvs();
 
@@ -863,7 +1132,7 @@ void app_main(void)
         xSemaphoreGive(lvgl_mutex);
     }
 
-    /* 先顯示一次 NVS 載入後的時間 */
+    /* 先顯示一次初始畫面 */
     g_time_syncing = true;
     g_wifi_failed = false;
     update_ui();
@@ -879,6 +1148,7 @@ void app_main(void)
         g_time_syncing = false;
         g_wifi_failed = true;
         ESP_LOGW(TAG, "WIFI 初始化失敗，使用本地/NVS時間");
+        update_ui();
     }
 
     /* 啟動 LVGL 背景任務，放到 CPU1 */
@@ -889,7 +1159,7 @@ void app_main(void)
     {
         g_time_syncing = true;
         g_wifi_failed = false;
-        xTaskCreatePinnedToCore(network_time_task, "network_time_task", 6144, NULL, 5, NULL, 1);
+        xTaskCreatePinnedToCore(network_time_task, "network_time_task", 8192, NULL, 5, NULL, 1);
     }
 
     while (1)

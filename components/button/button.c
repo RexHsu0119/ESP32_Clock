@@ -66,42 +66,85 @@ static void button_scan_task(void *arg)
     {
         uint8_t up_state = gpio_get_level(BUTTON_UP);
         uint8_t down_state = gpio_get_level(BUTTON_DOWN);
+        uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-        /* 先處理 UP + DOWN 組合鍵 */
-        if (up_state == 0 && down_state == 0)
+        /* -------------------------------------------------
+         * 組合鍵優先處理：
+         * 一旦進入 combo 模式，就完全忽略個別按鍵事件，
+         * 直到 UP 和 DOWN 都放開為止
+         * ------------------------------------------------- */
+        if (combo_up_down_active)
         {
-            if (!combo_up_down_active)
+            if (up_state == 1 && down_state == 1)
             {
-                combo_up_down_active = true;
+                combo_up_down_active = false;
 
-                button_event_t event = {
-                    .button_id = BUTTON_COMBO_UP_DOWN,
-                    .event_type = BUTTON_SHORT_PRESS};
-
-                if (xQueueSend(button_event_queue, &event, 0) != pdTRUE)
+                /* 重置 UP / DOWN 狀態，避免放開後補送單鍵事件 */
+                for (int i = 0; i < BUTTON_COUNT; i++)
                 {
-                    ESP_LOGW(TAG, "按鈕事件隊列已滿，丟棄組合鍵事件");
+                    if (button_states[i].button_id == BUTTON_UP ||
+                        button_states[i].button_id == BUTTON_DOWN)
+                    {
+                        button_states[i].last_state = 1;
+                        button_states[i].press_time = 0;
+                    }
+                    else
+                    {
+                        button_states[i].last_state = gpio_get_level(button_states[i].gpio_num);
+                    }
                 }
-                else
+
+                ESP_LOGD(TAG, "組合鍵結束");
+            }
+            else
+            {
+                /* combo 期間持續同步狀態，但不送個別按鍵事件 */
+                for (int i = 0; i < BUTTON_COUNT; i++)
                 {
-                    ESP_LOGI(TAG, "偵測到組合鍵: UP + DOWN");
+                    button_states[i].last_state = gpio_get_level(button_states[i].gpio_num);
                 }
             }
 
-            /* 同時按住時，不處理個別按鍵事件 */
+            vTaskDelay(pdMS_TO_TICKS(BUTTON_CHECK_INTERVAL));
+            continue;
+        }
+
+        /* 偵測 UP + DOWN 組合鍵 */
+        if (up_state == 0 && down_state == 0)
+        {
+            combo_up_down_active = true;
+
+            button_event_t event = {
+                .button_id = BUTTON_COMBO_UP_DOWN,
+                .event_type = BUTTON_SHORT_PRESS};
+
+            if (xQueueSend(button_event_queue, &event, 0) != pdTRUE)
+            {
+                ESP_LOGW(TAG, "按鈕事件隊列已滿，丟棄組合鍵事件");
+            }
+            else
+            {
+                ESP_LOGI(TAG, "偵測到組合鍵: UP + DOWN");
+            }
+
+            /* 重置 UP / DOWN 的按下時間，避免後續放開時被當成單鍵 */
             for (int i = 0; i < BUTTON_COUNT; i++)
             {
+                if (button_states[i].button_id == BUTTON_UP ||
+                    button_states[i].button_id == BUTTON_DOWN)
+                {
+                    button_states[i].press_time = 0;
+                }
                 button_states[i].last_state = gpio_get_level(button_states[i].gpio_num);
             }
 
             vTaskDelay(pdMS_TO_TICKS(BUTTON_CHECK_INTERVAL));
             continue;
         }
-        else
-        {
-            combo_up_down_active = false;
-        }
 
+        /* -------------------------------------------------
+         * 一般單鍵處理
+         * ------------------------------------------------- */
         for (int i = 0; i < BUTTON_COUNT; i++)
         {
             button_state_t *state = &button_states[i];
@@ -110,13 +153,12 @@ static void button_scan_task(void *arg)
             /* 檢測按下 */
             if (current_state == 0 && state->last_state == 1)
             {
-                state->press_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                state->press_time = now_ms;
                 ESP_LOGD(TAG, "按鈕 %d 按下", state->button_id);
             }
             /* 檢測釋放 */
             else if (current_state == 1 && state->last_state == 0)
             {
-                uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
                 uint32_t press_duration = now_ms - state->press_time;
 
                 if (press_duration >= LONG_PRESS_TIME_MS)
@@ -263,5 +305,6 @@ void button_deinit(void)
     }
 
     button_callback = NULL;
+    combo_up_down_active = false;
     ESP_LOGI(TAG, "按鈕模組已反初始化");
 }

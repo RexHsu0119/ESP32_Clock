@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/semphr.h"
 
 #include "esp_log.h"
@@ -18,7 +19,13 @@ static const char *TAG = "WEATHER";
 
 /* 新竹縣湖口鄉附近經緯度 */
 #define WEATHER_URL \
-    "https://api.open-meteo.com/v1/forecast?latitude=24.858&longitude=121.056&current=temperature_2m,relative_humidity_2m&timezone=Asia%2FTaipei"
+    "https://api.open-meteo.com/v1/forecast?latitude=24.903&longitude=121.044&current=temperature_2m,relative_humidity_2m&timezone=Asia%2FTaipei"
+
+#define WEATHER_HTTP_TIMEOUT_MS 10000
+#define WEATHER_HTTP_RX_BUF_SIZE 4096
+#define WEATHER_HTTP_TX_BUF_SIZE 1024
+#define WEATHER_RETRY_COUNT 3
+#define WEATHER_RETRY_DELAY_MS 1000
 
 typedef struct
 {
@@ -68,34 +75,9 @@ static esp_err_t weather_http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-void weather_init(void)
+static bool weather_update_once(void)
 {
-    if (s_weather_mutex == NULL)
-    {
-        s_weather_mutex = xSemaphoreCreateMutex();
-        if (s_weather_mutex == NULL)
-        {
-            ESP_LOGE(TAG, "建立 weather mutex 失敗");
-        }
-    }
-}
-
-bool weather_update_now(void)
-{
-    weather_init();
-
-    if (s_weather_mutex == NULL)
-    {
-        return false;
-    }
-
-    if (!wifi_is_connected())
-    {
-        ESP_LOGW(TAG, "Wi-Fi 尚未連線，無法更新天氣");
-        return false;
-    }
-
-    char response_buffer[1024] = {0};
+    char response_buffer[2048] = {0};
     http_resp_ctx_t ctx = {
         .buffer = response_buffer,
         .capacity = sizeof(response_buffer),
@@ -107,8 +89,13 @@ bool weather_update_now(void)
         .url = WEATHER_URL,
         .event_handler = weather_http_event_handler,
         .user_data = &ctx,
-        .timeout_ms = 5000,
+        .timeout_ms = WEATHER_HTTP_TIMEOUT_MS,
+        .transport_type = HTTP_TRANSPORT_OVER_SSL,
         .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = WEATHER_HTTP_RX_BUF_SIZE,
+        .buffer_size_tx = WEATHER_HTTP_TX_BUF_SIZE,
+        .user_agent = "ESP32-Clock/1.0",
+        .keep_alive_enable = false,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -159,7 +146,7 @@ bool weather_update_now(void)
     }
 
     float temp_c = (float)temperature->valuedouble;
-    int hum_percent = (int)(humidity->valuedouble + 0.5);
+    int hum_percent = (int)(humidity->valuedouble + 0.5f);
 
     if (xSemaphoreTake(s_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
     {
@@ -173,6 +160,52 @@ bool weather_update_now(void)
 
     ESP_LOGI(TAG, "湖口天氣更新成功: %.1f C, %d%%RH", temp_c, hum_percent);
     return true;
+}
+
+void weather_init(void)
+{
+    if (s_weather_mutex == NULL)
+    {
+        s_weather_mutex = xSemaphoreCreateMutex();
+        if (s_weather_mutex == NULL)
+        {
+            ESP_LOGE(TAG, "建立 weather mutex 失敗");
+        }
+    }
+}
+
+bool weather_update_now(void)
+{
+    weather_init();
+
+    if (s_weather_mutex == NULL)
+    {
+        return false;
+    }
+
+    if (!wifi_is_connected())
+    {
+        ESP_LOGW(TAG, "Wi-Fi 尚未連線，無法更新天氣");
+        return false;
+    }
+
+    for (int attempt = 1; attempt <= WEATHER_RETRY_COUNT; attempt++)
+    {
+        if (weather_update_once())
+        {
+            return true;
+        }
+
+        if (attempt < WEATHER_RETRY_COUNT)
+        {
+            ESP_LOGW(TAG, "天氣更新失敗，準備重試... (%d/%d)",
+                     attempt, WEATHER_RETRY_COUNT);
+            vTaskDelay(pdMS_TO_TICKS(WEATHER_RETRY_DELAY_MS));
+        }
+    }
+
+    ESP_LOGE(TAG, "天氣更新最終失敗");
+    return false;
 }
 
 bool weather_get_info(weather_info_t *out)
