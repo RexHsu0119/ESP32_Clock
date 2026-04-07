@@ -219,12 +219,11 @@ void display_init(void)
     /* 7. 綁定 LVGL */
     display_lvgl_init(io_handle);
 
-    /* 8. 稍等一下再開背光，降低短暫雪花機率 */
-    vTaskDelay(pdMS_TO_TICKS(30));
-    gpio_set_level(PIN_LCD_BL, LCD_BL_ON_LEVEL);
+    /* 8. 初始化完成後先維持背光關閉，由上層在適當時機再開 */
+    gpio_set_level(PIN_LCD_BL, LCD_BL_OFF_LEVEL);
 
     s_display_inited = true;
-    ESP_LOGI(TAG, "顯示模組初始化完成");
+    ESP_LOGI(TAG, "顯示模組初始化完成（背光暫時保持關閉）");
 }
 
 void display_set_brightness(uint8_t brightness)
@@ -245,4 +244,78 @@ void display_set_brightness(uint8_t brightness)
     }
 
     ESP_LOGD(TAG, "背光亮度設置為: %d%%", brightness);
+}
+
+void display_sleep(void)
+{
+    if (!s_display_inited || panel_handle == NULL)
+    {
+        ESP_LOGW(TAG, "display 尚未初始化，忽略 display_sleep()");
+        return;
+    }
+
+    esp_err_t ret = esp_lcd_panel_disp_on_off(panel_handle, false);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "LCD 顯示關閉失敗: %s", esp_err_to_name(ret));
+    }
+    else
+    {
+        ESP_LOGI(TAG, "LCD 顯示已關閉");
+    }
+}
+
+void display_wake(void)
+{
+    if (!s_display_inited || panel_handle == NULL)
+    {
+        ESP_LOGW(TAG, "display 尚未初始化，忽略 display_wake()");
+        return;
+    }
+
+    esp_err_t ret = esp_lcd_panel_disp_on_off(panel_handle, true);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "LCD 顯示開啟失敗: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    /* 先給 LCD 一點穩定時間，再開背光 */
+    vTaskDelay(pdMS_TO_TICKS(30));
+    display_set_brightness(100);
+
+    ESP_LOGI(TAG, "LCD 顯示已開啟");
+}
+
+void display_prepare_for_sleep(void)
+{
+    if (!s_display_inited)
+    {
+        ESP_LOGW(TAG, "display 尚未初始化，僅處理背光腳位");
+    }
+    else
+    {
+        display_sleep();
+    }
+
+    /* 關閉背光 */
+    gpio_set_level(PIN_LCD_BL, LCD_BL_OFF_LEVEL);
+
+    /* 保持背光腳位狀態進入 Deep Sleep */
+    gpio_hold_en(PIN_LCD_BL);
+    gpio_deep_sleep_hold_en();
+
+    ESP_LOGI(TAG, "Display 已準備進入 sleep，背光保持關閉");
+}
+
+void display_resume_from_sleep(void)
+{
+    /* 解除 Deep Sleep GPIO hold，讓後續可正常控制背光 */
+    gpio_deep_sleep_hold_dis();
+    gpio_hold_dis(PIN_LCD_BL);
+
+    /* 醒來後先保持背光關閉，等待上層初始化與畫面更新完成 */
+    gpio_set_level(PIN_LCD_BL, LCD_BL_OFF_LEVEL);
+
+    ESP_LOGI(TAG, "Display 已從 sleep 恢復（背光維持關閉）");
 }

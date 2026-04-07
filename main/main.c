@@ -13,6 +13,11 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_sleep.h"
+#include "esp_attr.h"
+
+#include "driver/gpio.h"
+#include "driver/rtc_io.h"
 
 #include "my_rtc.h"
 #include "wifi.h"
@@ -50,6 +55,18 @@ static bool is_setting_time = false;
 static struct tm time_setting = {0};
 static clock_panel_t current_panel = PANEL_DIGITAL;
 static time_set_field_t current_set_field = SET_FIELD_HOUR;
+
+/* 時間顯示有效旗標 */
+static bool g_time_base_valid = false;
+
+/* 是否在同步期間強制顯示未知值 */
+static bool g_force_unknown_during_sync = true;
+
+/* Deep Sleep 後仍保留的狀態 */
+RTC_DATA_ATTR static bool s_rtc_time_valid = false;
+
+/* 由 main task 執行 Deep Sleep，避免在 button task 內做重操作 */
+static volatile bool g_request_deep_sleep = false;
 
 /* LVGL 物件 */
 static lv_obj_t *digital_container = NULL;
@@ -103,6 +120,7 @@ static volatile bool g_wifi_failed = false;
 static void lvgl_task(void *arg);
 static void network_time_task(void *arg);
 static void update_ui(void);
+static void enter_deep_sleep(void);
 
 /* 類比時鐘尺寸 */
 #define ANALOG_FACE_SIZE 64
@@ -460,12 +478,12 @@ static bool has_valid_display_time(void)
         return true;
     }
 
-    if (g_time_syncing)
+    if (g_time_syncing && g_force_unknown_during_sync)
     {
         return false;
     }
 
-    return rtc_is_ntp_synced();
+    return g_time_base_valid;
 }
 
 static void set_weather_text(void)
@@ -487,7 +505,7 @@ static void set_weather_text(void)
         }
     }
 
-    if (g_time_syncing)
+    if (g_time_syncing && g_force_unknown_during_sync)
     {
         if (weather_label != NULL)
         {
@@ -578,6 +596,10 @@ static void save_time_setting_and_exit(void)
             .tv_usec = 0};
         settimeofday(&tv, NULL);
         rtc_save_to_nvs();
+
+        g_time_base_valid = true;
+        s_rtc_time_valid = true;
+
         ESP_LOGI(TAG, "時間設置已保存");
     }
     else
@@ -632,6 +654,42 @@ static void advance_setting_field(void)
     }
 }
 
+static void enter_deep_sleep(void)
+{
+    if (is_setting_time)
+    {
+        ESP_LOGI(TAG, "設時模式中，不進入 Deep Sleep");
+        return;
+    }
+
+    s_rtc_time_valid = g_time_base_valid;
+
+    ESP_LOGI(TAG, "準備進入 Deep Sleep，等待 CENTER 放開...");
+
+    /* 先關 LCD 顯示並保持背光關閉 */
+    display_prepare_for_sleep();
+
+    /* 等待 CENTER 放開，避免 GPIO0 仍為低電位導致立刻喚醒 */
+    while (gpio_get_level(BUTTON_CENTER) == 0)
+    {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    /* debounce */
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    wifi_disconnect();
+
+    rtc_gpio_pullup_en(GPIO_NUM_0);
+    rtc_gpio_pulldown_dis(GPIO_NUM_0);
+
+    ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0));
+
+    ESP_LOGI(TAG, "已進入 Deep Sleep，按下 CENTER 可喚醒");
+    vTaskDelay(pdMS_TO_TICKS(20));
+    esp_deep_sleep_start();
+}
+
 static void start_manual_resync(void)
 {
     if (is_setting_time)
@@ -655,6 +713,7 @@ static void start_manual_resync(void)
         return;
     }
 
+    g_force_unknown_during_sync = true;
     g_time_syncing = true;
     g_wifi_failed = false;
 
@@ -979,6 +1038,12 @@ static void network_time_task(void *arg)
         ESP_LOGI(TAG, "WIFI 連接成功，正在同步時間...");
         rtc_sync_from_ntp();
 
+        if (rtc_is_ntp_synced())
+        {
+            g_time_base_valid = true;
+            s_rtc_time_valid = true;
+        }
+
         /* 等網路與 SNTP 狀態更穩定後再抓天氣 */
         vTaskDelay(pdMS_TO_TICKS(800));
 
@@ -990,7 +1055,13 @@ static void network_time_task(void *arg)
     else
     {
         g_wifi_failed = true;
-        ESP_LOGW(TAG, "WIFI 連接失敗，使用本地/NVS時間");
+        ESP_LOGW(TAG, "WIFI 連接失敗");
+
+        /* 若先前已有有效時間基準（例如 Deep Sleep 喚醒），則保留顯示 */
+        if (s_rtc_time_valid)
+        {
+            g_time_base_valid = true;
+        }
     }
 
     g_time_syncing = false;
@@ -1065,10 +1136,21 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
             }
         }
     }
+    else if (event_type == BUTTON_VERY_LONG_PRESS)
+    {
+        if (button_id == BUTTON_CENTER)
+        {
+            /* 改由 main task 執行 Deep Sleep，避免在 button task 內做重操作 */
+            g_request_deep_sleep = true;
+        }
+    }
 }
 
 void app_main(void)
 {
+    esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
+    bool woke_from_deep_sleep = (wakeup_cause == ESP_SLEEP_WAKEUP_EXT0);
+
     /* 初始化 NVS */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
@@ -1081,6 +1163,13 @@ void app_main(void)
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "ESP32-S3 時鐘顯示系統啟動");
     ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "喚醒原因: %d", (int)wakeup_cause);
+
+    /* Deep Sleep 喚醒後先解除背光 hold，再初始化顯示 */
+    if (woke_from_deep_sleep)
+    {
+        display_resume_from_sleep();
+    }
 
     /* 初始化顯示 */
     ESP_LOGI(TAG, "初始化顯示模組...");
@@ -1107,9 +1196,19 @@ void app_main(void)
     ESP_LOGI(TAG, "初始化 Weather 模組...");
     weather_init();
 
-    /* 先從 NVS 載入上次的時間 */
-    ESP_LOGI(TAG, "從 NVS 載入上次的時間...");
-    rtc_load_from_nvs();
+    if (woke_from_deep_sleep && s_rtc_time_valid)
+    {
+        g_time_base_valid = true;
+        ESP_LOGI(TAG, "從 Deep Sleep 喚醒，沿用 RTC 系統時間");
+    }
+    else
+    {
+        g_time_base_valid = false;
+
+        /* 冷開機仍可先從 NVS 載入，但未經 NTP 不直接視為可信顯示基準 */
+        ESP_LOGI(TAG, "從 NVS 載入上次的時間...");
+        rtc_load_from_nvs();
+    }
 
     /* 初始化 LVGL Timer */
     const esp_timer_create_args_t tick_timer_args = {
@@ -1132,13 +1231,34 @@ void app_main(void)
         xSemaphoreGive(lvgl_mutex);
     }
 
-    /* 先顯示一次初始畫面 */
-    g_time_syncing = true;
+    /* 初始畫面策略 */
+    if (woke_from_deep_sleep && s_rtc_time_valid)
+    {
+        g_time_syncing = false;
+        g_force_unknown_during_sync = false;
+    }
+    else
+    {
+        g_time_syncing = true;
+        g_force_unknown_during_sync = true;
+    }
+
     g_wifi_failed = false;
     update_ui();
 
     ESP_LOGI(TAG, "進入主迴圈");
-    display_set_brightness(100);
+
+    /* 先黑屏一小段時間，等 UI 穩定後再開背光 */
+    if (woke_from_deep_sleep)
+    {
+        vTaskDelay(pdMS_TO_TICKS(80));
+    }
+    else
+    {
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+
+    display_wake();
 
     /* 先初始化 WIFI */
     ESP_LOGI(TAG, "初始化 WIFI 模組...");
@@ -1147,7 +1267,13 @@ void app_main(void)
     {
         g_time_syncing = false;
         g_wifi_failed = true;
-        ESP_LOGW(TAG, "WIFI 初始化失敗，使用本地/NVS時間");
+        ESP_LOGW(TAG, "WIFI 初始化失敗");
+
+        if (s_rtc_time_valid)
+        {
+            g_time_base_valid = true;
+        }
+
         update_ui();
     }
 
@@ -1159,11 +1285,27 @@ void app_main(void)
     {
         g_time_syncing = true;
         g_wifi_failed = false;
+
+        if (woke_from_deep_sleep && s_rtc_time_valid)
+        {
+            g_force_unknown_during_sync = false;
+        }
+        else
+        {
+            g_force_unknown_during_sync = true;
+        }
+
         xTaskCreatePinnedToCore(network_time_task, "network_time_task", 8192, NULL, 5, NULL, 1);
     }
 
     while (1)
     {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (g_request_deep_sleep)
+        {
+            g_request_deep_sleep = false;
+            enter_deep_sleep();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }

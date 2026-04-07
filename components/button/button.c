@@ -18,6 +18,8 @@ typedef struct
     uint8_t button_id;
     uint32_t press_time;
     uint8_t last_state;
+    bool long_sent;
+    bool very_long_sent;
 } button_state_t;
 
 /* 按鈕事件結構體 */
@@ -29,9 +31,9 @@ typedef struct
 
 /* 按鈕配置 */
 static button_state_t button_states[] = {
-    {BUTTON_UP, BUTTON_UP, 0, 1},
-    {BUTTON_DOWN, BUTTON_DOWN, 0, 1},
-    {BUTTON_CENTER, BUTTON_CENTER, 0, 1},
+    {BUTTON_UP, BUTTON_UP, 0, 1, false, false},
+    {BUTTON_DOWN, BUTTON_DOWN, 0, 1, false, false},
+    {BUTTON_CENTER, BUTTON_CENTER, 0, 1, false, false},
 };
 
 #define BUTTON_COUNT (sizeof(button_states) / sizeof(button_states[0]))
@@ -45,9 +47,11 @@ static TaskHandle_t button_event_task_handle = NULL;
 /* 按鈕去抖動參數 */
 #define DEBOUNCE_TIME_MS 20
 #define LONG_PRESS_TIME_MS 1000
+#define VERY_LONG_PRESS_TIME_MS 3000
 #define BUTTON_CHECK_INTERVAL 10
 
-#define BUTTON_SCAN_TASK_STACK_SIZE 2048
+/* 調大 button_scan stack，避免 stack overflow */
+#define BUTTON_SCAN_TASK_STACK_SIZE 4096
 #define BUTTON_EVENT_TASK_STACK_SIZE 4096
 
 /* 組合鍵狀態 */
@@ -87,6 +91,8 @@ static void button_scan_task(void *arg)
                     {
                         button_states[i].last_state = 1;
                         button_states[i].press_time = 0;
+                        button_states[i].long_sent = false;
+                        button_states[i].very_long_sent = false;
                     }
                     else
                     {
@@ -127,13 +133,15 @@ static void button_scan_task(void *arg)
                 ESP_LOGI(TAG, "偵測到組合鍵: UP + DOWN");
             }
 
-            /* 重置 UP / DOWN 的按下時間，避免後續放開時被當成單鍵 */
+            /* 重置 UP / DOWN 的狀態，避免後續放開時被當成單鍵 */
             for (int i = 0; i < BUTTON_COUNT; i++)
             {
                 if (button_states[i].button_id == BUTTON_UP ||
                     button_states[i].button_id == BUTTON_DOWN)
                 {
                     button_states[i].press_time = 0;
+                    button_states[i].long_sent = false;
+                    button_states[i].very_long_sent = false;
                 }
                 button_states[i].last_state = gpio_get_level(button_states[i].gpio_num);
             }
@@ -154,14 +162,47 @@ static void button_scan_task(void *arg)
             if (current_state == 0 && state->last_state == 1)
             {
                 state->press_time = now_ms;
+                state->long_sent = false;
+                state->very_long_sent = false;
                 ESP_LOGD(TAG, "按鈕 %d 按下", state->button_id);
+            }
+            /* 按住期間即時檢測超長按：CENTER 超過門檻就立刻觸發 */
+            else if (current_state == 0 && state->last_state == 0)
+            {
+                uint32_t press_duration = now_ms - state->press_time;
+
+                if (state->button_id == BUTTON_CENTER &&
+                    !state->very_long_sent &&
+                    press_duration >= VERY_LONG_PRESS_TIME_MS)
+                {
+                    button_event_t event = {
+                        .button_id = state->button_id,
+                        .event_type = BUTTON_VERY_LONG_PRESS};
+
+                    if (xQueueSend(button_event_queue, &event, 0) != pdTRUE)
+                    {
+                        ESP_LOGW(TAG, "按鈕事件隊列已滿，丟棄超長按事件");
+                    }
+                    else
+                    {
+                        ESP_LOGI(TAG, "按鈕 %d 超長按達門檻，立即觸發 (%" PRIu32 " ms)",
+                                 state->button_id, press_duration);
+                    }
+
+                    state->very_long_sent = true;
+                    state->long_sent = true;
+                }
             }
             /* 檢測釋放 */
             else if (current_state == 1 && state->last_state == 0)
             {
                 uint32_t press_duration = now_ms - state->press_time;
 
-                if (press_duration >= LONG_PRESS_TIME_MS)
+                if (state->very_long_sent)
+                {
+                    /* 已在按住期間送出超長按，不再補送事件 */
+                }
+                else if (press_duration >= LONG_PRESS_TIME_MS)
                 {
                     button_event_t event = {
                         .button_id = state->button_id,

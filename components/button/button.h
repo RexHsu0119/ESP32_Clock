@@ -14,6 +14,7 @@
 // 按鈕事件類型
 #define BUTTON_SHORT_PRESS 0
 #define BUTTON_LONG_PRESS 1
+#define BUTTON_VERY_LONG_PRESS 2
 
 // 按鈕事件回調函數類型
 typedef void (*button_callback_t)(uint8_t button_id, uint8_t event_type);
