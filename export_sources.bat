@@ -23,6 +23,12 @@ call :append "components\rtc\my_rtc.h"
 call :append "components\wifi\wifi.c"
 call :append "components\wifi\wifi.h"
 
+call :append "components\wifi_config\wifi_config.c"
+call :append "components\wifi_config\wifi_config.h"
+
+call :append "components\wifi_portal\wifi_portal.c"
+call :append "components\wifi_portal\wifi_portal.h"
+
 echo.
 echo 完成，已輸出到 %OUT%
 start notepad "%OUT%"

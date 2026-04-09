@@ -21,16 +21,14 @@
 
 #include "my_rtc.h"
 #include "wifi.h"
+#include "wifi_config.h"
+#include "wifi_portal.h"
 #include "display.h"
 #include "button.h"
 #include "weather.h"
 #include "lvgl.h"
 
 static const char *TAG = "MAIN";
-
-/* 建議之後改成從設定檔或 NVS 讀取，不要硬編碼在原始碼 */
-static const char *WIFI_SSID = "RexHsu";
-static const char *WIFI_PASSWORD = "0933356554";
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -51,10 +49,25 @@ typedef enum
     SET_FIELD_SECOND,
 } time_set_field_t;
 
+typedef enum
+{
+    APP_MODE_CLOCK = 0,
+    APP_MODE_WIFI_PORTAL,
+} app_mode_t;
+
+typedef enum
+{
+    BOOT_HINT_NONE = 0,
+    BOOT_HINT_FORCE_SETUP,
+    BOOT_HINT_CLEAR_WIFI,
+} boot_hint_t;
+
 static bool is_setting_time = false;
 static struct tm time_setting = {0};
 static clock_panel_t current_panel = PANEL_DIGITAL;
 static time_set_field_t current_set_field = SET_FIELD_HOUR;
+static app_mode_t g_app_mode = APP_MODE_CLOCK;
+static boot_hint_t g_boot_hint = BOOT_HINT_NONE;
 
 /* 時間顯示有效旗標 */
 static bool g_time_base_valid = false;
@@ -68,9 +81,22 @@ RTC_DATA_ATTR static bool s_rtc_time_valid = false;
 /* 由 main task 執行 Deep Sleep，避免在 button task 內做重操作 */
 static volatile bool g_request_deep_sleep = false;
 
+/* Wi-Fi credentials 由 NVS 載入 */
+static char g_wifi_ssid[WIFI_CONFIG_SSID_MAX_LEN + 1] = {0};
+static char g_wifi_password[WIFI_CONFIG_PASSWORD_MAX_LEN + 1] = {0};
+static bool g_wifi_credentials_loaded = false;
+
 /* LVGL 物件 */
 static lv_obj_t *digital_container = NULL;
 static lv_obj_t *analog_container = NULL;
+static lv_obj_t *portal_container = NULL;
+
+/* 開機提示 overlay */
+static lv_obj_t *boot_overlay = NULL;
+static lv_obj_t *boot_overlay_title = NULL;
+static lv_obj_t *boot_overlay_line1 = NULL;
+static lv_obj_t *boot_overlay_line2 = NULL;
+static lv_obj_t *boot_overlay_line3 = NULL;
 
 /* 數位錶面：上方列 */
 static lv_obj_t *net_status_label = NULL;
@@ -95,6 +121,13 @@ static lv_obj_t *analog_weekday_label = NULL;
 /* 類比錶面：右側資訊 */
 static lv_obj_t *analog_temp_label = NULL;
 static lv_obj_t *analog_humidity_label = NULL;
+
+/* 配網畫面 */
+static lv_obj_t *portal_title_label = NULL;
+static lv_obj_t *portal_line1_label = NULL;
+static lv_obj_t *portal_line2_label = NULL;
+static lv_obj_t *portal_line3_label = NULL;
+static lv_obj_t *portal_line4_label = NULL;
 
 static lv_obj_t *analog_face = NULL;
 static lv_obj_t *hour_hand = NULL;
@@ -147,11 +180,132 @@ static void enter_deep_sleep(void);
 #define ANALOG_INFO_HUMI_Y 52
 #define ANALOG_INFO_WIDTH 68
 
-/* LVGL 的時間滴答 */
+/* 開機按住 UP 強制進 ClockSetup */
+/* 開機按住 DOWN 清除 Wi-Fi 設定並進 ClockSetup */
+#define PORTAL_FORCE_HOLD_MS 800
+#define PORTAL_FORCE_SAMPLE_MS 20
+
+/* 開機提示畫面顯示時間 */
+#define BOOT_HINT_FORCE_SETUP_MS 1000
+#define BOOT_HINT_CLEAR_WIFI_MS 1200
+
 static void lvgl_tick_cb(void *arg)
 {
     (void)arg;
     lv_tick_inc(2);
+}
+
+static bool is_button_held_on_boot(uint32_t gpio_num, const char *name)
+{
+    gpio_config_t io_conf = {0};
+    io_conf.pin_bit_mask = (1ULL << gpio_num);
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+
+    esp_err_t ret = gpio_config(&io_conf);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "設定開機偵測 %s 腳位失敗: %s", name, esp_err_to_name(ret));
+        return false;
+    }
+
+    if (gpio_get_level(gpio_num) != 0)
+    {
+        return false;
+    }
+
+    ESP_LOGI(TAG, "偵測到開機時 %s 已按下，確認是否達門檻...", name);
+
+    int loops = PORTAL_FORCE_HOLD_MS / PORTAL_FORCE_SAMPLE_MS;
+    for (int i = 0; i < loops; i++)
+    {
+        if (gpio_get_level(gpio_num) != 0)
+        {
+            ESP_LOGI(TAG, "%s 已放開，不觸發開機功能", name);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(PORTAL_FORCE_SAMPLE_MS));
+    }
+
+    ESP_LOGI(TAG, "開機按住 %s 達門檻", name);
+    return true;
+}
+
+static bool should_force_wifi_portal_on_boot(void)
+{
+    return is_button_held_on_boot(BUTTON_UP, "UP");
+}
+
+static bool should_clear_wifi_credentials_on_boot(void)
+{
+    return is_button_held_on_boot(BUTTON_DOWN, "DOWN");
+}
+
+static bool load_wifi_credentials_from_nvs(void)
+{
+    memset(g_wifi_ssid, 0, sizeof(g_wifi_ssid));
+    memset(g_wifi_password, 0, sizeof(g_wifi_password));
+    g_wifi_credentials_loaded = false;
+
+    if (wifi_config_load_credentials(g_wifi_ssid, sizeof(g_wifi_ssid),
+                                     g_wifi_password, sizeof(g_wifi_password)))
+    {
+        g_wifi_credentials_loaded = true;
+        ESP_LOGI(TAG, "已從 NVS 載入 Wi-Fi 設定: SSID=%s", g_wifi_ssid);
+        return true;
+    }
+
+    ESP_LOGW(TAG, "尚未設定 Wi-Fi credentials，將進入配網模式");
+    return false;
+}
+
+static bool start_network_sync_task(bool force_unknown_during_sync)
+{
+    if (!g_wifi_credentials_loaded)
+    {
+        ESP_LOGW(TAG, "尚未載入 Wi-Fi credentials，無法啟動同步");
+        return false;
+    }
+
+    if (g_time_syncing)
+    {
+        ESP_LOGI(TAG, "目前正在同步中");
+        return false;
+    }
+
+    if (!wifi_init())
+    {
+        g_time_syncing = false;
+        g_wifi_failed = true;
+        ESP_LOGW(TAG, "WIFI 初始化失敗");
+        update_ui();
+        return false;
+    }
+
+    g_force_unknown_during_sync = force_unknown_during_sync;
+    g_time_syncing = true;
+    g_wifi_failed = false;
+    update_ui();
+
+    BaseType_t ret = xTaskCreatePinnedToCore(network_time_task,
+                                             "network_time_task",
+                                             8192,
+                                             NULL,
+                                             5,
+                                             NULL,
+                                             1);
+    if (ret != pdPASS)
+    {
+        g_time_syncing = false;
+        g_wifi_failed = true;
+        ESP_LOGE(TAG, "建立 network_time_task 失敗");
+        update_ui();
+        return false;
+    }
+
+    return true;
 }
 
 static const char *weekday_name(int wday)
@@ -183,7 +337,11 @@ static const char *get_setting_status_text(void)
 
 static const char *get_top_status_text(void)
 {
-    if (is_setting_time)
+    if (g_app_mode == APP_MODE_WIFI_PORTAL)
+    {
+        return "SETUP";
+    }
+    else if (is_setting_time)
     {
         return "SET";
     }
@@ -213,7 +371,7 @@ static void update_panel_visibility(void)
 {
     if (digital_container != NULL)
     {
-        if (current_panel == PANEL_DIGITAL)
+        if (g_app_mode == APP_MODE_CLOCK && current_panel == PANEL_DIGITAL)
         {
             lv_obj_clear_flag(digital_container, LV_OBJ_FLAG_HIDDEN);
         }
@@ -225,13 +383,25 @@ static void update_panel_visibility(void)
 
     if (analog_container != NULL)
     {
-        if (current_panel == PANEL_ANALOG)
+        if (g_app_mode == APP_MODE_CLOCK && current_panel == PANEL_ANALOG)
         {
             lv_obj_clear_flag(analog_container, LV_OBJ_FLAG_HIDDEN);
         }
         else
         {
             lv_obj_add_flag(analog_container, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    if (portal_container != NULL)
+    {
+        if (g_app_mode == APP_MODE_WIFI_PORTAL)
+        {
+            lv_obj_clear_flag(portal_container, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_add_flag(portal_container, LV_OBJ_FLAG_HIDDEN);
         }
     }
 }
@@ -473,6 +643,11 @@ static void set_analog_clock_visible(bool visible)
 
 static bool has_valid_display_time(void)
 {
+    if (g_app_mode == APP_MODE_WIFI_PORTAL)
+    {
+        return false;
+    }
+
     if (is_setting_time)
     {
         return true;
@@ -565,6 +740,129 @@ static void set_weather_text(void)
         {
             lv_label_set_text(analog_humidity_label, "__%RH");
         }
+    }
+}
+
+static void update_portal_ui(void)
+{
+    if (portal_title_label == NULL ||
+        portal_line1_label == NULL ||
+        portal_line2_label == NULL ||
+        portal_line3_label == NULL ||
+        portal_line4_label == NULL)
+    {
+        return;
+    }
+
+    lv_label_set_text(portal_title_label, "WIFI SETUP");
+
+    if (!wifi_portal_is_running())
+    {
+        lv_label_set_text(portal_line1_label, "Starting portal...");
+        lv_label_set_text(portal_line2_label, "");
+        lv_label_set_text(portal_line3_label, "");
+        lv_label_set_text(portal_line4_label, "");
+        return;
+    }
+
+    lv_label_set_text_fmt(portal_line1_label, "AP: %s", WIFI_PORTAL_DEFAULT_AP_SSID);
+    lv_label_set_text_fmt(portal_line2_label, "IP: %s", wifi_portal_get_ap_ip());
+
+    if (wifi_portal_has_new_credentials())
+    {
+        lv_obj_set_style_text_color(portal_line3_label, lv_color_hex(0x00FFCC), 0);
+        lv_obj_set_style_text_color(portal_line4_label, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(portal_line4_label, &lv_font_montserrat_12, 0);
+
+        lv_label_set_text_fmt(portal_line3_label, "Saved: %s", wifi_portal_get_last_ssid());
+        lv_label_set_text(portal_line4_label, "Reconnecting...");
+    }
+    else
+    {
+        lv_obj_set_style_text_color(portal_line3_label, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_color(portal_line4_label, lv_color_hex(0xFF0000), 0);
+        lv_obj_set_style_text_font(portal_line4_label, &lv_font_montserrat_10, 0);
+
+        lv_label_set_text(portal_line3_label, "Open in phone");
+        lv_label_set_text_fmt(portal_line4_label, "http://%s", wifi_portal_get_ap_ip());
+    }
+}
+
+static void create_boot_overlay(lv_obj_t *scr)
+{
+    boot_overlay = lv_obj_create(scr);
+    lv_obj_set_size(boot_overlay, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_center(boot_overlay);
+    lv_obj_set_style_bg_color(boot_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(boot_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(boot_overlay, 0, 0);
+    lv_obj_set_style_pad_all(boot_overlay, 0, 0);
+    lv_obj_clear_flag(boot_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(boot_overlay, LV_OBJ_FLAG_HIDDEN);
+
+    boot_overlay_title = lv_label_create(boot_overlay);
+    lv_obj_set_style_text_color(boot_overlay_title, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(boot_overlay_title, &lv_font_montserrat_18, 0);
+    lv_label_set_text(boot_overlay_title, "FORCE SETUP");
+    lv_obj_align(boot_overlay_title, LV_ALIGN_TOP_MID, 0, 6);
+
+    boot_overlay_line1 = lv_label_create(boot_overlay);
+    lv_obj_set_style_text_color(boot_overlay_line1, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(boot_overlay_line1, &lv_font_montserrat_12, 0);
+    lv_label_set_text(boot_overlay_line1, "Entering ClockSetup");
+    lv_obj_align(boot_overlay_line1, LV_ALIGN_TOP_MID, 0, 30);
+
+    boot_overlay_line2 = lv_label_create(boot_overlay);
+    lv_obj_set_style_text_color(boot_overlay_line2, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(boot_overlay_line2, &lv_font_montserrat_12, 0);
+    lv_label_set_text(boot_overlay_line2, "AP: ClockSetup");
+    lv_obj_align(boot_overlay_line2, LV_ALIGN_TOP_MID, 0, 46);
+
+    boot_overlay_line3 = lv_label_create(boot_overlay);
+    lv_obj_set_style_text_color(boot_overlay_line3, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(boot_overlay_line3, &lv_font_montserrat_10, 0);
+    lv_label_set_text(boot_overlay_line3, "192.168.4.1");
+    lv_obj_align(boot_overlay_line3, LV_ALIGN_TOP_MID, 0, 62);
+}
+
+static void show_boot_overlay(boot_hint_t hint)
+{
+    if (boot_overlay == NULL)
+    {
+        return;
+    }
+
+    switch (hint)
+    {
+    case BOOT_HINT_FORCE_SETUP:
+        lv_label_set_text(boot_overlay_title, "FORCE SETUP");
+        lv_label_set_text(boot_overlay_line1, "Entering ClockSetup");
+        lv_label_set_text(boot_overlay_line2, "AP: ClockSetup");
+        lv_label_set_text(boot_overlay_line3, "192.168.4.1");
+        break;
+
+    case BOOT_HINT_CLEAR_WIFI:
+        lv_label_set_text(boot_overlay_title, "CLEAR WIFI");
+        lv_label_set_text(boot_overlay_line1, "Credentials erased");
+        lv_label_set_text(boot_overlay_line2, "Entering setup...");
+        lv_label_set_text(boot_overlay_line3, "192.168.4.1");
+        break;
+
+    case BOOT_HINT_NONE:
+    default:
+        lv_obj_add_flag(boot_overlay, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    lv_obj_move_foreground(boot_overlay);
+    lv_obj_clear_flag(boot_overlay, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void hide_boot_overlay(void)
+{
+    if (boot_overlay != NULL)
+    {
+        lv_obj_add_flag(boot_overlay, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -666,19 +964,24 @@ static void enter_deep_sleep(void)
 
     ESP_LOGI(TAG, "準備進入 Deep Sleep，等待 CENTER 放開...");
 
-    /* 先關 LCD 顯示並保持背光關閉 */
     display_prepare_for_sleep();
 
-    /* 等待 CENTER 放開，避免 GPIO0 仍為低電位導致立刻喚醒 */
     while (gpio_get_level(BUTTON_CENTER) == 0)
     {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    /* debounce */
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    wifi_disconnect();
+    if (wifi_portal_is_running())
+    {
+        wifi_portal_stop();
+        wifi_disconnect();
+    }
+    else
+    {
+        wifi_disconnect();
+    }
 
     rtc_gpio_pullup_en(GPIO_NUM_0);
     rtc_gpio_pulldown_dis(GPIO_NUM_0);
@@ -692,41 +995,26 @@ static void enter_deep_sleep(void)
 
 static void start_manual_resync(void)
 {
+    if (g_app_mode == APP_MODE_WIFI_PORTAL)
+    {
+        ESP_LOGI(TAG, "目前在配網模式中，忽略手動重同步要求");
+        return;
+    }
+
     if (is_setting_time)
     {
         ESP_LOGI(TAG, "目前在設時模式中，忽略手動重同步要求");
         return;
     }
 
-    if (g_time_syncing)
+    if (!g_wifi_credentials_loaded)
     {
-        ESP_LOGI(TAG, "目前正在同步中，忽略手動重同步要求");
+        ESP_LOGW(TAG, "尚未設定 Wi-Fi，無法手動重同步");
         return;
     }
 
     ESP_LOGI(TAG, "手動觸發 NTP / Weather 重新同步");
-
-    if (!wifi_init())
-    {
-        g_wifi_failed = true;
-        ESP_LOGW(TAG, "手動重同步失敗：WIFI 初始化失敗");
-        return;
-    }
-
-    g_force_unknown_during_sync = true;
-    g_time_syncing = true;
-    g_wifi_failed = false;
-
-    /* 立刻更新 UI，讓時間/天氣立即顯示未知 */
-    update_ui();
-
-    xTaskCreatePinnedToCore(network_time_task,
-                            "network_time_task",
-                            8192,
-                            NULL,
-                            5,
-                            NULL,
-                            1);
+    start_network_sync_task(true);
 }
 
 static void create_digital_ui(lv_obj_t *scr)
@@ -739,7 +1027,6 @@ static void create_digital_ui(lv_obj_t *scr)
     lv_obj_set_style_pad_all(digital_container, 0, 0);
     lv_obj_clear_flag(digital_container, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* 上方列：狀態 / 日期 / 星期 */
     lv_obj_t *top_row = lv_obj_create(digital_container);
     lv_obj_set_size(top_row, DISPLAY_WIDTH - 4, 12);
     lv_obj_align(top_row, LV_ALIGN_TOP_MID, 0, 1);
@@ -778,7 +1065,6 @@ static void create_digital_ui(lv_obj_t *scr)
     lv_obj_set_style_text_font(weekday_label, &lv_font_montserrat_10, 0);
     lv_label_set_text(weekday_label, "SUN");
 
-    /* 中間大時間 */
     lv_obj_t *time_row = lv_obj_create(digital_container);
     lv_obj_set_size(time_row,
                     DIGIT_FIELD_WIDTH * 3 + COLON_FIELD_WIDTH * 2,
@@ -830,7 +1116,6 @@ static void create_digital_ui(lv_obj_t *scr)
     lv_obj_set_style_text_font(second_label, &lv_font_montserrat_24, 0);
     lv_label_set_text(second_label, "00");
 
-    /* 下方資訊列 */
     weather_label = lv_label_create(digital_container);
     lv_obj_set_style_text_color(weather_label, lv_color_hex(0x00FFCC), 0);
     lv_obj_set_style_text_font(weather_label, &lv_font_montserrat_14, 0);
@@ -848,7 +1133,6 @@ static void create_analog_ui(lv_obj_t *scr)
     lv_obj_set_style_pad_all(analog_container, 0, 0);
     lv_obj_clear_flag(analog_container, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* 上方列：狀態 / 日期 / 星期，不與時鐘重疊 */
     lv_obj_t *top_row = lv_obj_create(analog_container);
     lv_obj_set_size(top_row, DISPLAY_WIDTH - 4, 12);
     lv_obj_align(top_row, LV_ALIGN_TOP_MID, 0, 1);
@@ -887,7 +1171,6 @@ static void create_analog_ui(lv_obj_t *scr)
     lv_obj_set_style_text_font(analog_weekday_label, &lv_font_montserrat_10, 0);
     lv_label_set_text(analog_weekday_label, "SUN");
 
-    /* 左側時鐘：維持原本形狀，不與上方列重疊 */
     analog_face = lv_obj_create(analog_container);
     lv_obj_set_size(analog_face, ANALOG_FACE_SIZE, ANALOG_FACE_SIZE);
     lv_obj_set_pos(analog_face, ANALOG_FACE_X, ANALOG_FACE_Y);
@@ -922,7 +1205,6 @@ static void create_analog_ui(lv_obj_t *scr)
     lv_obj_set_style_border_width(center_dot, 0, 0);
     lv_obj_center(center_dot);
 
-    /* 右側只放溫度與濕度 */
     analog_temp_label = lv_label_create(analog_container);
     lv_obj_set_width(analog_temp_label, ANALOG_INFO_WIDTH);
     lv_label_set_long_mode(analog_temp_label, LV_LABEL_LONG_CLIP);
@@ -940,6 +1222,62 @@ static void create_analog_ui(lv_obj_t *scr)
     lv_obj_set_style_text_font(analog_humidity_label, &lv_font_montserrat_14, 0);
     lv_label_set_text(analog_humidity_label, "__%RH");
     lv_obj_set_pos(analog_humidity_label, ANALOG_INFO_X, ANALOG_INFO_HUMI_Y);
+}
+
+static void create_portal_ui(lv_obj_t *scr)
+{
+    portal_container = lv_obj_create(scr);
+    lv_obj_set_size(portal_container, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_center(portal_container);
+    lv_obj_set_style_bg_opa(portal_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(portal_container, 0, 0);
+    lv_obj_set_style_pad_all(portal_container, 0, 0);
+    lv_obj_clear_flag(portal_container, LV_OBJ_FLAG_SCROLLABLE);
+
+    portal_title_label = lv_label_create(portal_container);
+    lv_obj_set_width(portal_title_label, DISPLAY_WIDTH - 8);
+    lv_label_set_long_mode(portal_title_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(portal_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(portal_title_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(portal_title_label, &lv_font_montserrat_18, 0);
+    lv_label_set_text(portal_title_label, "WIFI SETUP");
+    lv_obj_set_pos(portal_title_label, 4, 4);
+
+    portal_line1_label = lv_label_create(portal_container);
+    lv_obj_set_width(portal_line1_label, DISPLAY_WIDTH - 16);
+    lv_label_set_long_mode(portal_line1_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(portal_line1_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(portal_line1_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(portal_line1_label, &lv_font_montserrat_12, 0);
+    lv_label_set_text(portal_line1_label, "AP: ClockSetup");
+    lv_obj_set_pos(portal_line1_label, 8, 26);
+
+    portal_line2_label = lv_label_create(portal_container);
+    lv_obj_set_width(portal_line2_label, DISPLAY_WIDTH - 16);
+    lv_label_set_long_mode(portal_line2_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(portal_line2_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(portal_line2_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(portal_line2_label, &lv_font_montserrat_12, 0);
+    lv_label_set_text(portal_line2_label, "IP: 192.168.4.1");
+    lv_obj_set_pos(portal_line2_label, 8, 40);
+
+    portal_line3_label = lv_label_create(portal_container);
+    lv_obj_set_width(portal_line3_label, DISPLAY_WIDTH - 16);
+    lv_label_set_long_mode(portal_line3_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(portal_line3_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(portal_line3_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(portal_line3_label, &lv_font_montserrat_12, 0);
+    lv_label_set_text(portal_line3_label, "Open in phone");
+    lv_obj_set_pos(portal_line3_label, 8, 56);
+
+    portal_line4_label = lv_label_create(portal_container);
+    lv_obj_set_width(portal_line4_label, DISPLAY_WIDTH - 16);
+    lv_label_set_long_mode(portal_line4_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(portal_line4_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(portal_line4_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(portal_line4_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(portal_line4_label, "http://192.168.4.1");
+    lv_obj_set_pos(portal_line4_label, 8, 70);
 }
 
 static void update_ui(void)
@@ -966,6 +1304,13 @@ static void update_ui(void)
     if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
         update_panel_visibility();
+
+        if (g_app_mode == APP_MODE_WIFI_PORTAL)
+        {
+            update_portal_ui();
+            xSemaphoreGive(lvgl_mutex);
+            return;
+        }
 
         if (valid_time)
         {
@@ -1033,7 +1378,7 @@ static void network_time_task(void *arg)
 
     ESP_LOGI(TAG, "背景開始進行 Wi-Fi / NTP / Weather 更新");
 
-    if (wifi_connect(WIFI_SSID, WIFI_PASSWORD))
+    if (wifi_connect(g_wifi_ssid, g_wifi_password))
     {
         ESP_LOGI(TAG, "WIFI 連接成功，正在同步時間...");
         rtc_sync_from_ntp();
@@ -1044,7 +1389,6 @@ static void network_time_task(void *arg)
             s_rtc_time_valid = true;
         }
 
-        /* 等網路與 SNTP 狀態更穩定後再抓天氣 */
         vTaskDelay(pdMS_TO_TICKS(800));
 
         if (!weather_update_now())
@@ -1055,9 +1399,8 @@ static void network_time_task(void *arg)
     else
     {
         g_wifi_failed = true;
-        ESP_LOGW(TAG, "WIFI 連接失敗");
+        ESP_LOGW(TAG, "WIFI 連接失敗 (SSID=%s)", g_wifi_ssid);
 
-        /* 若先前已有有效時間基準（例如 Deep Sleep 喚醒），則保留顯示 */
         if (s_rtc_time_valid)
         {
             g_time_base_valid = true;
@@ -1065,17 +1408,23 @@ static void network_time_task(void *arg)
     }
 
     g_time_syncing = false;
-
-    /* 同步結束後立即刷新畫面 */
     update_ui();
 
     ESP_LOGI(TAG, "背景網路更新流程結束");
     vTaskDelete(NULL);
 }
 
-/* 按鈕回調函數 */
 void button_event_callback(uint8_t button_id, uint8_t event_type)
 {
+    if (g_app_mode == APP_MODE_WIFI_PORTAL)
+    {
+        if (event_type == BUTTON_VERY_LONG_PRESS && button_id == BUTTON_CENTER)
+        {
+            g_request_deep_sleep = true;
+        }
+        return;
+    }
+
     if (event_type == BUTTON_SHORT_PRESS)
     {
         if (is_setting_time)
@@ -1140,7 +1489,6 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
     {
         if (button_id == BUTTON_CENTER)
         {
-            /* 改由 main task 執行 Deep Sleep，避免在 button task 內做重操作 */
             g_request_deep_sleep = true;
         }
     }
@@ -1150,8 +1498,10 @@ void app_main(void)
 {
     esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
     bool woke_from_deep_sleep = (wakeup_cause == ESP_SLEEP_WAKEUP_EXT0);
+    bool has_wifi_credentials = false;
+    bool force_portal = false;
+    bool clear_wifi_credentials = false;
 
-    /* 初始化 NVS */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
@@ -1165,17 +1515,46 @@ void app_main(void)
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "喚醒原因: %d", (int)wakeup_cause);
 
-    /* Deep Sleep 喚醒後先解除背光 hold，再初始化顯示 */
+    clear_wifi_credentials = should_clear_wifi_credentials_on_boot();
+    force_portal = (!clear_wifi_credentials) ? should_force_wifi_portal_on_boot() : false;
+
+    if (clear_wifi_credentials)
+    {
+        g_boot_hint = BOOT_HINT_CLEAR_WIFI;
+        ESP_LOGI(TAG, "開機按住 DOWN：清除 Wi-Fi 設定並進入 ClockSetup");
+        if (!wifi_config_clear_credentials())
+        {
+            ESP_LOGW(TAG, "清除 Wi-Fi 設定失敗");
+        }
+    }
+    else if (force_portal)
+    {
+        g_boot_hint = BOOT_HINT_FORCE_SETUP;
+    }
+    else
+    {
+        g_boot_hint = BOOT_HINT_NONE;
+    }
+
+    has_wifi_credentials = load_wifi_credentials_from_nvs();
+
+    if (force_portal || clear_wifi_credentials)
+    {
+        g_app_mode = APP_MODE_WIFI_PORTAL;
+    }
+    else
+    {
+        g_app_mode = has_wifi_credentials ? APP_MODE_CLOCK : APP_MODE_WIFI_PORTAL;
+    }
+
     if (woke_from_deep_sleep)
     {
         display_resume_from_sleep();
     }
 
-    /* 初始化顯示 */
     ESP_LOGI(TAG, "初始化顯示模組...");
     display_init();
 
-    /* 建立 LVGL mutex */
     lvgl_mutex = xSemaphoreCreateMutex();
     if (lvgl_mutex == NULL)
     {
@@ -1183,16 +1562,13 @@ void app_main(void)
         return;
     }
 
-    /* 初始化按鈕 */
     ESP_LOGI(TAG, "初始化按鈕模組...");
     button_init();
     button_register_callback(button_event_callback);
 
-    /* 初始化 RTC */
     ESP_LOGI(TAG, "初始化 RTC 模組...");
     my_rtc_init();
 
-    /* 初始化 Weather */
     ESP_LOGI(TAG, "初始化 Weather 模組...");
     weather_init();
 
@@ -1204,13 +1580,10 @@ void app_main(void)
     else
     {
         g_time_base_valid = false;
-
-        /* 冷開機仍可先從 NVS 載入，但未經 NTP 不直接視為可信顯示基準 */
         ESP_LOGI(TAG, "從 NVS 載入上次的時間...");
         rtc_load_from_nvs();
     }
 
-    /* 初始化 LVGL Timer */
     const esp_timer_create_args_t tick_timer_args = {
         .callback = lvgl_tick_cb,
         .name = "lvgl_tick"};
@@ -1218,7 +1591,6 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_create(&tick_timer_args, &tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(tick_timer, 2 * 1000));
 
-    /* 建立畫面 */
     if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
     {
         lv_obj_t *scr = lv_screen_active();
@@ -1226,29 +1598,42 @@ void app_main(void)
 
         create_digital_ui(scr);
         create_analog_ui(scr);
+        create_portal_ui(scr);
+        create_boot_overlay(scr);
         update_panel_visibility();
+
+        if (g_boot_hint != BOOT_HINT_NONE)
+        {
+            show_boot_overlay(g_boot_hint);
+        }
 
         xSemaphoreGive(lvgl_mutex);
     }
 
-    /* 初始畫面策略 */
-    if (woke_from_deep_sleep && s_rtc_time_valid)
+    if (g_app_mode == APP_MODE_WIFI_PORTAL)
     {
         g_time_syncing = false;
         g_force_unknown_during_sync = false;
+        g_wifi_failed = false;
+    }
+    else if (woke_from_deep_sleep && s_rtc_time_valid)
+    {
+        g_time_syncing = false;
+        g_force_unknown_during_sync = false;
+        g_wifi_failed = false;
     }
     else
     {
-        g_time_syncing = true;
+        /* 修正同步啟動 bug：這裡不要先設成 true */
+        g_time_syncing = false;
         g_force_unknown_during_sync = true;
+        g_wifi_failed = false;
     }
 
-    g_wifi_failed = false;
     update_ui();
 
     ESP_LOGI(TAG, "進入主迴圈");
 
-    /* 先黑屏一小段時間，等 UI 穩定後再開背光 */
     if (woke_from_deep_sleep)
     {
         vTaskDelay(pdMS_TO_TICKS(80));
@@ -1260,42 +1645,36 @@ void app_main(void)
 
     display_wake();
 
-    /* 先初始化 WIFI */
-    ESP_LOGI(TAG, "初始化 WIFI 模組...");
-    bool wifi_ok = wifi_init();
-    if (!wifi_ok)
-    {
-        g_time_syncing = false;
-        g_wifi_failed = true;
-        ESP_LOGW(TAG, "WIFI 初始化失敗");
+    xTaskCreatePinnedToCore(lvgl_task, "lvgl", 8192, NULL, 5, NULL, 1);
 
-        if (s_rtc_time_valid)
+    if (g_boot_hint != BOOT_HINT_NONE)
+    {
+        uint32_t hint_delay_ms = (g_boot_hint == BOOT_HINT_CLEAR_WIFI)
+                                     ? BOOT_HINT_CLEAR_WIFI_MS
+                                     : BOOT_HINT_FORCE_SETUP_MS;
+
+        vTaskDelay(pdMS_TO_TICKS(hint_delay_ms));
+
+        if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
         {
-            g_time_base_valid = true;
+            hide_boot_overlay();
+            xSemaphoreGive(lvgl_mutex);
         }
 
         update_ui();
     }
 
-    /* 啟動 LVGL 背景任務，放到 CPU1 */
-    xTaskCreatePinnedToCore(lvgl_task, "lvgl", 8192, NULL, 5, NULL, 1);
-
-    /* 若 WIFI 初始化成功，再啟動背景網路更新任務，放到 CPU1 */
-    if (wifi_ok)
+    if (g_app_mode == APP_MODE_WIFI_PORTAL)
     {
-        g_time_syncing = true;
-        g_wifi_failed = false;
-
-        if (woke_from_deep_sleep && s_rtc_time_valid)
+        if (!wifi_portal_start(NULL, NULL))
         {
-            g_force_unknown_during_sync = false;
+            ESP_LOGE(TAG, "啟動 Wi-Fi portal 失敗");
         }
-        else
-        {
-            g_force_unknown_during_sync = true;
-        }
-
-        xTaskCreatePinnedToCore(network_time_task, "network_time_task", 8192, NULL, 5, NULL, 1);
+        update_ui();
+    }
+    else
+    {
+        start_network_sync_task(!(woke_from_deep_sleep && s_rtc_time_valid));
     }
 
     while (1)
@@ -1304,6 +1683,36 @@ void app_main(void)
         {
             g_request_deep_sleep = false;
             enter_deep_sleep();
+        }
+
+        if (g_app_mode == APP_MODE_WIFI_PORTAL && wifi_portal_has_new_credentials())
+        {
+            ESP_LOGI(TAG, "偵測到新的 Wi-Fi credentials，準備切回 STA 模式");
+
+            wifi_portal_clear_new_credentials_flag();
+            update_ui();
+
+            wifi_portal_stop();
+            wifi_disconnect();
+
+            if (load_wifi_credentials_from_nvs())
+            {
+                g_app_mode = APP_MODE_CLOCK;
+                current_panel = PANEL_DIGITAL;
+                g_wifi_failed = false;
+                g_time_syncing = false;
+                g_force_unknown_during_sync = true;
+
+                update_ui();
+                start_network_sync_task(true);
+            }
+            else
+            {
+                ESP_LOGE(TAG, "重新載入 Wi-Fi credentials 失敗，回到 portal 模式");
+                g_app_mode = APP_MODE_WIFI_PORTAL;
+                wifi_portal_start(NULL, NULL);
+                update_ui();
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));

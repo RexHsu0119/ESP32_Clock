@@ -4,10 +4,13 @@ idf_component_register(
     REQUIRES
         nvs_flash
         esp_timer
-        lvgl
-        rtc
-        wifi
+        driver
         display
         button
+        rtc
+        wifi
         weather
+        wifi_config
+        wifi_portal
+        lvgl
 )

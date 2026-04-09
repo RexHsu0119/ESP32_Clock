@@ -1,6 +1,7 @@
 #include "wifi.h"
 
 #include <string.h>
+#include <stdlib.h>
 
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -23,6 +24,7 @@ static int retry_num = 0;
 static const int MAXIMUM_RETRY = 5;
 static bool wifi_initialized = false;
 static bool wifi_started = false;
+static bool wifi_sta_autoconnect = false;
 
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
@@ -33,8 +35,15 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     {
         if (event_id == WIFI_EVENT_STA_START)
         {
-            ESP_LOGI(TAG, "WIFI 開始連接...");
-            esp_wifi_connect();
+            if (wifi_sta_autoconnect)
+            {
+                ESP_LOGI(TAG, "WIFI 開始連接...");
+                esp_wifi_connect();
+            }
+            else
+            {
+                ESP_LOGI(TAG, "STA_START，autoconnect 已停用");
+            }
         }
         else if (event_id == WIFI_EVENT_STA_DISCONNECTED)
         {
@@ -47,13 +56,13 @@ static void event_handler(void *arg, esp_event_base_t event_base,
                 ESP_LOGW(TAG, "WIFI 斷線，reason=%d", event->reason);
             }
 
-            if (retry_num < MAXIMUM_RETRY)
+            if (wifi_sta_autoconnect && retry_num < MAXIMUM_RETRY)
             {
                 esp_wifi_connect();
                 retry_num++;
                 ESP_LOGI(TAG, "重試連接 WIFI... (%d/%d)", retry_num, MAXIMUM_RETRY);
             }
-            else
+            else if (wifi_sta_autoconnect)
             {
                 xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
                 ESP_LOGW(TAG, "連接 WIFI 失敗，已達最大重試次數");
@@ -111,7 +120,6 @@ bool wifi_init(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    /* 使用 RAM 儲存 Wi-Fi 配置，減少不必要 NVS 交互 */
     ret = esp_wifi_set_storage(WIFI_STORAGE_RAM);
     if (ret != ESP_OK)
     {
@@ -141,6 +149,7 @@ bool wifi_init(void)
     }
 
     wifi_initialized = true;
+    wifi_sta_autoconnect = false;
     ESP_LOGI(TAG, "WIFI 初始化成功");
     return true;
 }
@@ -161,6 +170,7 @@ bool wifi_connect(const char *ssid, const char *password)
 
     xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
     retry_num = 0;
+    wifi_sta_autoconnect = true;
 
     wifi_config_t wifi_config = {0};
 
@@ -173,9 +183,6 @@ bool wifi_connect(const char *ssid, const char *password)
     }
     else
     {
-        /* 您目前 AP 看起來會走 WPA3-SAE，
-         * 這裡改成 WPA2/WPA3 轉換模式比較合適
-         */
         wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_WPA3_PSK;
     }
 
@@ -186,7 +193,14 @@ bool wifi_connect(const char *ssid, const char *password)
     wifi_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
 #endif
 
-    esp_err_t ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    esp_err_t ret = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "切換 WIFI 到 STA 模式失敗: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "設置 WIFI 配置失敗: %s", esp_err_to_name(ret));
@@ -244,10 +258,106 @@ bool wifi_connect(const char *ssid, const char *password)
     }
 }
 
+bool wifi_scan_networks(wifi_scan_result_t *results, uint16_t *count, uint16_t max_count)
+{
+    if (!wifi_initialized)
+    {
+        ESP_LOGE(TAG, "WIFI 未初始化");
+        return false;
+    }
+
+    if (results == NULL || count == NULL || max_count == 0)
+    {
+        ESP_LOGE(TAG, "wifi_scan_networks 參數無效");
+        return false;
+    }
+
+    uint16_t requested = max_count;
+    if (requested > WIFI_SCAN_MAX_APS)
+    {
+        requested = WIFI_SCAN_MAX_APS;
+    }
+
+    wifi_ap_record_t *ap_records = calloc(requested, sizeof(wifi_ap_record_t));
+    if (ap_records == NULL)
+    {
+        ESP_LOGE(TAG, "配置掃描記憶體失敗");
+        return false;
+    }
+
+    wifi_scan_config_t scan_config = {
+        .ssid = NULL,
+        .bssid = NULL,
+        .channel = 0,
+        .show_hidden = false,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+    };
+
+    ESP_LOGI(TAG, "開始掃描附近 Wi-Fi AP...");
+
+    esp_err_t ret = esp_wifi_scan_start(&scan_config, true);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "啟動 Wi-Fi 掃描失敗: %s", esp_err_to_name(ret));
+        free(ap_records);
+        return false;
+    }
+
+    uint16_t ap_count = requested;
+    ret = esp_wifi_scan_get_ap_records(&ap_count, ap_records);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "取得掃描結果失敗: %s", esp_err_to_name(ret));
+        free(ap_records);
+        return false;
+    }
+
+    uint16_t out_count = 0;
+    for (uint16_t i = 0; i < ap_count && out_count < requested; i++)
+    {
+        if (strlen((const char *)ap_records[i].ssid) == 0)
+        {
+            continue;
+        }
+
+        /* 去除重複 SSID，只保留第一筆 */
+        bool duplicated = false;
+        for (uint16_t j = 0; j < out_count; j++)
+        {
+            if (strcmp(results[j].ssid, (const char *)ap_records[i].ssid) == 0)
+            {
+                duplicated = true;
+                break;
+            }
+        }
+
+        if (duplicated)
+        {
+            continue;
+        }
+
+        strncpy(results[out_count].ssid,
+                (const char *)ap_records[i].ssid,
+                sizeof(results[out_count].ssid) - 1);
+        results[out_count].ssid[sizeof(results[out_count].ssid) - 1] = '\0';
+        results[out_count].rssi = ap_records[i].rssi;
+        results[out_count].authmode = ap_records[i].authmode;
+        out_count++;
+    }
+
+    *count = out_count;
+
+    ESP_LOGI(TAG, "Wi-Fi 掃描完成，共 %u 筆", out_count);
+
+    free(ap_records);
+    return true;
+}
+
 void wifi_disconnect(void)
 {
     if (wifi_initialized)
     {
+        wifi_sta_autoconnect = false;
         esp_wifi_disconnect();
 
         if (wifi_started)
