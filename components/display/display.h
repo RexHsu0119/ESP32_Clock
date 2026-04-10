@@ -8,7 +8,7 @@
 
 // ST7735S 顯示解析度
 #define DISPLAY_WIDTH 160
-#define DISPLAY_HEIGHT 80
+#define DISPLAY_HEIGHT 128 // 80
 
 // SPI 引腳定義
 #define PIN_SPI_MOSI 47

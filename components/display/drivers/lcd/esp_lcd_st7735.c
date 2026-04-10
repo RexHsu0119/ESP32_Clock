@@ -176,9 +176,10 @@ typedef struct
 const uint8_t TFT_INIT_DELAY = 0;
 // modify for ST7735S, 0.96" TFT LCD, alcheng @20251014
 static const st7735_lcd_init_cmd_t vendor_specific_init_default[] = {
-    {ST7735_SWRESET, (uint8_t[]){0x00}, 1, 0},                               // Software reset, 0 args, w/delay 150
-    {ST7735_SLPOUT, (uint8_t[]){0x00}, 1, 0},                                // Out of sleep mode, 0 args, w/delay 500
-    {ST7735_MADCTL, (uint8_t[]){0x68}, 1, 0},                                // Rex 20260319 modify 0x08-->0x68
+    {ST7735_SWRESET, (uint8_t[]){0x00}, 1, 0}, // Software reset, 0 args, w/delay 150
+    {ST7735_SLPOUT, (uint8_t[]){0x00}, 1, 0},  // Out of sleep mode, 0 args, w/delay 500
+    //{ST7735_MADCTL, (uint8_t[]){0x68}, 1, 0},                                // Rex 20260319 modify 0x08-->0x68 BGR 0.96" panel
+    {ST7735_MADCTL, (uint8_t[]){0x60}, 1, 0},                                // Rex 20260410 modify 0x68-->0x60 160x128 RGB 1.8" panel
     {ST7735_FRMCTR1, (uint8_t[]){0x05, 0x3A, 0x3A}, 3, 0},                   // Frame rate ctrl - normal mode, 3 args: Rate = fosc/(1x2+40) * (LINE+2C+2D)
     {ST7735_FRMCTR2, (uint8_t[]){0x05, 0x3A, 0x3A}, 3, 0},                   // Frame rate control - idle mode, 3 args:Rate = fosc/(1x2+40) * (LINE+2C+2D)
     {ST7735_FRMCTR3, (uint8_t[]){0x05, 0x3A, 0x3A, 0x05, 0x3A, 0x3A}, 6, 0}, // Frame rate ctrl - partial mode, 6 args:Dot inversion mode. Line inversion mode

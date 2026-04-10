@@ -23,8 +23,12 @@ static const char *TAG = "DISPLAY";
 #define LCD_PIXEL_CLOCK_HZ (20 * 1000 * 1000)
 
 /* ST7735 160x80 常見偏移 */
+// #define LCD_X_OFFSET 0
+// #define LCD_Y_OFFSET 24
+
+/* ST7735 160x128 常見偏移 */
 #define LCD_X_OFFSET 0
-#define LCD_Y_OFFSET 24
+#define LCD_Y_OFFSET 0
 
 /* 背光極性：
  * 依您目前板子的實際行為，1 看起來是亮、0 是關
