@@ -20,6 +20,8 @@ typedef struct
     uint8_t last_state;
     bool long_sent;
     bool very_long_sent;
+    uint32_t last_repeat_time;
+    bool repeat_active;
 } button_state_t;
 
 /* 按鈕事件結構體 */
@@ -31,9 +33,9 @@ typedef struct
 
 /* 按鈕配置 */
 static button_state_t button_states[] = {
-    {BUTTON_UP, BUTTON_UP, 0, 1, false, false},
-    {BUTTON_DOWN, BUTTON_DOWN, 0, 1, false, false},
-    {BUTTON_CENTER, BUTTON_CENTER, 0, 1, false, false},
+    {BUTTON_UP, BUTTON_UP, 0, 1, false, false, 0, false},
+    {BUTTON_DOWN, BUTTON_DOWN, 0, 1, false, false, 0, false},
+    {BUTTON_CENTER, BUTTON_CENTER, 0, 1, false, false, 0, false},
 };
 
 #define BUTTON_COUNT (sizeof(button_states) / sizeof(button_states[0]))
@@ -49,6 +51,10 @@ static TaskHandle_t button_event_task_handle = NULL;
 #define LONG_PRESS_TIME_MS 1000
 #define VERY_LONG_PRESS_TIME_MS 3000
 #define BUTTON_CHECK_INTERVAL 10
+
+/* 長按連續輸入參數（UP / DOWN） */
+#define REPEAT_START_TIME_MS 400
+#define REPEAT_INTERVAL_MS 120
 
 /* 調大 button_scan stack，避免 stack overflow */
 #define BUTTON_SCAN_TASK_STACK_SIZE 4096
@@ -93,6 +99,8 @@ static void button_scan_task(void *arg)
                         button_states[i].press_time = 0;
                         button_states[i].long_sent = false;
                         button_states[i].very_long_sent = false;
+                        button_states[i].last_repeat_time = 0;
+                        button_states[i].repeat_active = false;
                     }
                     else
                     {
@@ -142,6 +150,8 @@ static void button_scan_task(void *arg)
                     button_states[i].press_time = 0;
                     button_states[i].long_sent = false;
                     button_states[i].very_long_sent = false;
+                    button_states[i].last_repeat_time = 0;
+                    button_states[i].repeat_active = false;
                 }
                 button_states[i].last_state = gpio_get_level(button_states[i].gpio_num);
             }
@@ -164,13 +174,41 @@ static void button_scan_task(void *arg)
                 state->press_time = now_ms;
                 state->long_sent = false;
                 state->very_long_sent = false;
+                state->last_repeat_time = 0;
+                state->repeat_active = false;
                 ESP_LOGD(TAG, "按鈕 %d 按下", state->button_id);
             }
-            /* 按住期間即時檢測超長按：CENTER 超過門檻就立刻觸發 */
+            /* 按住期間 */
             else if (current_state == 0 && state->last_state == 0)
             {
                 uint32_t press_duration = now_ms - state->press_time;
 
+                /* UP / DOWN 支援連續輸入 */
+                if ((state->button_id == BUTTON_UP || state->button_id == BUTTON_DOWN) &&
+                    press_duration >= REPEAT_START_TIME_MS)
+                {
+                    if (!state->repeat_active ||
+                        (now_ms - state->last_repeat_time) >= REPEAT_INTERVAL_MS)
+                    {
+                        button_event_t event = {
+                            .button_id = state->button_id,
+                            .event_type = BUTTON_REPEAT_PRESS};
+
+                        if (xQueueSend(button_event_queue, &event, 0) != pdTRUE)
+                        {
+                            ESP_LOGW(TAG, "按鈕事件隊列已滿，丟棄 repeat 事件");
+                        }
+                        else
+                        {
+                            ESP_LOGD(TAG, "按鈕 %d repeat", state->button_id);
+                        }
+
+                        state->repeat_active = true;
+                        state->last_repeat_time = now_ms;
+                    }
+                }
+
+                /* CENTER 超長按立即觸發 */
                 if (state->button_id == BUTTON_CENTER &&
                     !state->very_long_sent &&
                     press_duration >= VERY_LONG_PRESS_TIME_MS)
@@ -201,6 +239,10 @@ static void button_scan_task(void *arg)
                 if (state->very_long_sent)
                 {
                     /* 已在按住期間送出超長按，不再補送事件 */
+                }
+                else if (state->repeat_active)
+                {
+                    /* 已進入連續輸入模式，放開時不補送 short/long */
                 }
                 else if (press_duration >= LONG_PRESS_TIME_MS)
                 {

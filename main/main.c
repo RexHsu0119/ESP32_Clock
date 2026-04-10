@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -18,6 +19,7 @@
 
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
+#include "driver/i2s_std.h"
 
 #include "my_rtc.h"
 #include "wifi.h"
@@ -62,12 +64,55 @@ typedef enum
     BOOT_HINT_CLEAR_WIFI,
 } boot_hint_t;
 
+typedef enum
+{
+    ALARM_REPEAT_ONCE = 0,
+    ALARM_REPEAT_DAILY,
+} alarm_repeat_t;
+
+typedef enum
+{
+    ALARM_FIELD_ENABLE = 0,
+    ALARM_FIELD_REPEAT,
+    ALARM_FIELD_HOUR,
+    ALARM_FIELD_MINUTE,
+} alarm_set_field_t;
+
+typedef struct
+{
+    bool enabled;
+    int hour;
+    int minute;
+    alarm_repeat_t repeat;
+} alarm_config_t;
+
 static bool is_setting_time = false;
 static struct tm time_setting = {0};
 static clock_panel_t current_panel = PANEL_DIGITAL;
 static time_set_field_t current_set_field = SET_FIELD_HOUR;
 static app_mode_t g_app_mode = APP_MODE_CLOCK;
 static boot_hint_t g_boot_hint = BOOT_HINT_NONE;
+
+/* 鬧鐘設定/狀態 */
+static alarm_config_t g_alarm = {
+    .enabled = false,
+    .hour = 7,
+    .minute = 0,
+    .repeat = ALARM_REPEAT_DAILY,
+};
+static alarm_config_t g_alarm_edit = {0};
+static bool g_alarm_setting_mode = false;
+static alarm_set_field_t g_alarm_set_field = ALARM_FIELD_ENABLE;
+static volatile bool g_alarm_ringing = false;
+static bool g_alarm_flash_on = false;
+static int64_t g_alarm_last_flash_us = 0;
+static TaskHandle_t g_alarm_sound_task_handle = NULL;
+
+/* 避免同一分鐘重複觸發 */
+static int g_alarm_last_trigger_year = -1;
+static int g_alarm_last_trigger_yday = -1;
+static int g_alarm_last_trigger_hour = -1;
+static int g_alarm_last_trigger_minute = -1;
 
 /* 時間顯示有效旗標 */
 static bool g_time_base_valid = false;
@@ -97,6 +142,17 @@ static lv_obj_t *boot_overlay_title = NULL;
 static lv_obj_t *boot_overlay_line1 = NULL;
 static lv_obj_t *boot_overlay_line2 = NULL;
 static lv_obj_t *boot_overlay_line3 = NULL;
+
+/* 鬧鐘設定 overlay */
+static lv_obj_t *alarm_overlay = NULL;
+static lv_obj_t *alarm_title_label = NULL;
+static lv_obj_t *alarm_help_label = NULL;
+/* 鬧鐘設定固定欄位 */
+static lv_obj_t *alarm_hour_label = NULL;
+static lv_obj_t *alarm_colon_label = NULL;
+static lv_obj_t *alarm_minute_label = NULL;
+static lv_obj_t *alarm_enable_label = NULL;
+static lv_obj_t *alarm_repeat_label = NULL;
 
 /* 數位錶面：上方列 */
 static lv_obj_t *net_status_label = NULL;
@@ -149,6 +205,10 @@ static SemaphoreHandle_t lvgl_mutex = NULL;
 static volatile bool g_time_syncing = false;
 static volatile bool g_wifi_failed = false;
 
+/* MAX98357 I2S */
+static i2s_chan_handle_t s_audio_tx_chan = NULL;
+static bool s_audio_inited = false;
+
 /* forward declarations */
 static void lvgl_task(void *arg);
 static void network_time_task(void *arg);
@@ -167,6 +227,7 @@ static void enter_deep_sleep(void);
 #define UI_UPDATE_PERIOD_NORMAL_MS 1000
 #define UI_UPDATE_PERIOD_SETTING_MS 500
 #define SETTING_BLINK_PERIOD_US 500000LL
+#define ALARM_FLASH_PERIOD_US 400000LL
 
 /* 數位時鐘固定欄位寬度 */
 #define DIGIT_FIELD_WIDTH 40
@@ -189,12 +250,160 @@ static void enter_deep_sleep(void);
 #define BOOT_HINT_FORCE_SETUP_MS 1000
 #define BOOT_HINT_CLEAR_WIFI_MS 1200
 
+/* MAX98357 pins on S3 智能擴展板 V1.7 */
+#define AUDIO_I2S_BCLK_GPIO GPIO_NUM_15
+#define AUDIO_I2S_WS_GPIO GPIO_NUM_16
+#define AUDIO_I2S_DOUT_GPIO GPIO_NUM_7
+
+#define AUDIO_SAMPLE_RATE_HZ 16000
+#define AUDIO_TONE_FREQ_HZ 1000
+#define AUDIO_AMPLITUDE 12000
+#define AUDIO_FRAME_SAMPLES 256
+
+#define ALARM_NAMESPACE "alarm_cfg"
+#define ALARM_KEY_ENABLED "enabled"
+#define ALARM_KEY_HOUR "hour"
+#define ALARM_KEY_MINUTE "minute"
+#define ALARM_KEY_REPEAT "repeat"
+
 static void lvgl_tick_cb(void *arg)
 {
     (void)arg;
     lv_tick_inc(2);
 }
 
+/* =========================
+ * Audio / MAX98357
+ * ========================= */
+static void audio_i2s_init(void)
+{
+    if (s_audio_inited)
+    {
+        return;
+    }
+
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    chan_cfg.auto_clear = true;
+
+    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &s_audio_tx_chan, NULL));
+
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_SAMPLE_RATE_HZ),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = AUDIO_I2S_BCLK_GPIO,
+            .ws = AUDIO_I2S_WS_GPIO,
+            .dout = AUDIO_I2S_DOUT_GPIO,
+            .din = I2S_GPIO_UNUSED,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv = false,
+            },
+        },
+    };
+
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_audio_tx_chan, &std_cfg));
+    ESP_ERROR_CHECK(i2s_channel_enable(s_audio_tx_chan));
+
+    s_audio_inited = true;
+
+    ESP_LOGI(TAG, "MAX98357 I2S 初始化完成: BCLK=%d WS=%d DOUT=%d",
+             AUDIO_I2S_BCLK_GPIO, AUDIO_I2S_WS_GPIO, AUDIO_I2S_DOUT_GPIO);
+}
+
+static void audio_play_tone_ms(int freq_hz, int duration_ms)
+{
+    if (!s_audio_inited || s_audio_tx_chan == NULL)
+    {
+        return;
+    }
+
+    int16_t buffer[AUDIO_FRAME_SAMPLES * 2];
+    size_t bytes_written = 0;
+
+    const int total_samples = (AUDIO_SAMPLE_RATE_HZ * duration_ms) / 1000;
+    int generated = 0;
+    float phase = 0.0f;
+    const float phase_step = 2.0f * (float)M_PI * (float)freq_hz / (float)AUDIO_SAMPLE_RATE_HZ;
+
+    while (generated < total_samples)
+    {
+        int samples_this_round = AUDIO_FRAME_SAMPLES;
+        if (samples_this_round > (total_samples - generated))
+        {
+            samples_this_round = total_samples - generated;
+        }
+
+        for (int i = 0; i < samples_this_round; i++)
+        {
+            int16_t sample = (int16_t)(sinf(phase) * AUDIO_AMPLITUDE);
+
+            buffer[i * 2 + 0] = sample;
+            buffer[i * 2 + 1] = sample;
+
+            phase += phase_step;
+            if (phase >= 2.0f * (float)M_PI)
+            {
+                phase -= 2.0f * (float)M_PI;
+            }
+        }
+
+        ESP_ERROR_CHECK(i2s_channel_write(
+            s_audio_tx_chan,
+            buffer,
+            samples_this_round * sizeof(int16_t) * 2,
+            &bytes_written,
+            portMAX_DELAY));
+
+        generated += samples_this_round;
+    }
+}
+
+static void audio_play_silence_ms(int duration_ms)
+{
+    if (!s_audio_inited || s_audio_tx_chan == NULL)
+    {
+        return;
+    }
+
+    int16_t buffer[AUDIO_FRAME_SAMPLES * 2];
+    memset(buffer, 0, sizeof(buffer));
+
+    size_t bytes_written = 0;
+    const int total_samples = (AUDIO_SAMPLE_RATE_HZ * duration_ms) / 1000;
+    int generated = 0;
+
+    while (generated < total_samples)
+    {
+        int samples_this_round = AUDIO_FRAME_SAMPLES;
+        if (samples_this_round > (total_samples - generated))
+        {
+            samples_this_round = total_samples - generated;
+        }
+
+        ESP_ERROR_CHECK(i2s_channel_write(
+            s_audio_tx_chan,
+            buffer,
+            samples_this_round * sizeof(int16_t) * 2,
+            &bytes_written,
+            portMAX_DELAY));
+
+        generated += samples_this_round;
+    }
+}
+
+static void audio_play_beep_ms(int duration_ms)
+{
+    audio_i2s_init();
+    audio_play_tone_ms(AUDIO_TONE_FREQ_HZ, duration_ms);
+    audio_play_silence_ms(20);
+}
+
+/* =========================
+ * Boot key / Wi-Fi creds
+ * ========================= */
 static bool is_button_held_on_boot(uint32_t gpio_num, const char *name)
 {
     gpio_config_t io_conf = {0};
@@ -308,6 +517,581 @@ static bool start_network_sync_task(bool force_unknown_during_sync)
     return true;
 }
 
+/* =========================
+ * Alarm
+ * ========================= */
+static const char *alarm_repeat_text(alarm_repeat_t repeat)
+{
+    return (repeat == ALARM_REPEAT_DAILY) ? "DAILY" : "ONCE";
+}
+
+static bool alarm_save_to_nvs(void)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(ALARM_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "打開 alarm NVS 失敗: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    err = nvs_set_u8(nvs_handle, ALARM_KEY_ENABLED, g_alarm.enabled ? 1 : 0);
+    if (err == ESP_OK)
+        err = nvs_set_i32(nvs_handle, ALARM_KEY_HOUR, g_alarm.hour);
+    if (err == ESP_OK)
+        err = nvs_set_i32(nvs_handle, ALARM_KEY_MINUTE, g_alarm.minute);
+    if (err == ESP_OK)
+        err = nvs_set_i32(nvs_handle, ALARM_KEY_REPEAT, (int32_t)g_alarm.repeat);
+    if (err == ESP_OK)
+        err = nvs_commit(nvs_handle);
+
+    nvs_close(nvs_handle);
+
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "儲存 alarm NVS 失敗: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "鬧鐘已儲存: enabled=%d time=%02d:%02d repeat=%s",
+             g_alarm.enabled, g_alarm.hour, g_alarm.minute, alarm_repeat_text(g_alarm.repeat));
+    return true;
+}
+
+static void alarm_load_from_nvs(void)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(ALARM_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK)
+    {
+        if (err != ESP_ERR_NVS_NOT_FOUND)
+        {
+            ESP_LOGE(TAG, "打開 alarm NVS 失敗: %s", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    uint8_t enabled = 0;
+    int32_t hour = g_alarm.hour;
+    int32_t minute = g_alarm.minute;
+    int32_t repeat = (int32_t)g_alarm.repeat;
+
+    esp_err_t e1 = nvs_get_u8(nvs_handle, ALARM_KEY_ENABLED, &enabled);
+    esp_err_t e2 = nvs_get_i32(nvs_handle, ALARM_KEY_HOUR, &hour);
+    esp_err_t e3 = nvs_get_i32(nvs_handle, ALARM_KEY_MINUTE, &minute);
+    esp_err_t e4 = nvs_get_i32(nvs_handle, ALARM_KEY_REPEAT, &repeat);
+
+    nvs_close(nvs_handle);
+
+    if (e1 == ESP_OK)
+        g_alarm.enabled = (enabled == 1);
+    if (e2 == ESP_OK && hour >= 0 && hour <= 23)
+        g_alarm.hour = (int)hour;
+    if (e3 == ESP_OK && minute >= 0 && minute <= 59)
+        g_alarm.minute = (int)minute;
+    if (e4 == ESP_OK && (repeat == ALARM_REPEAT_ONCE || repeat == ALARM_REPEAT_DAILY))
+        g_alarm.repeat = (alarm_repeat_t)repeat;
+
+    ESP_LOGI(TAG, "載入鬧鐘: enabled=%d time=%02d:%02d repeat=%s",
+             g_alarm.enabled, g_alarm.hour, g_alarm.minute, alarm_repeat_text(g_alarm.repeat));
+}
+
+static void alarm_mark_triggered(const struct tm *t)
+{
+    g_alarm_last_trigger_year = t->tm_year;
+    g_alarm_last_trigger_yday = t->tm_yday;
+    g_alarm_last_trigger_hour = t->tm_hour;
+    g_alarm_last_trigger_minute = t->tm_min;
+}
+
+static bool alarm_same_as_last_trigger(const struct tm *t)
+{
+    return (g_alarm_last_trigger_year == t->tm_year &&
+            g_alarm_last_trigger_yday == t->tm_yday &&
+            g_alarm_last_trigger_hour == t->tm_hour &&
+            g_alarm_last_trigger_minute == t->tm_min);
+}
+
+static void alarm_set_background_locked(lv_color_t color)
+{
+    lv_obj_t *scr = lv_screen_active();
+    if (scr != NULL)
+    {
+        lv_obj_set_style_bg_color(scr, color, 0);
+    }
+}
+
+static void alarm_apply_background_state_locked(void)
+{
+    if (g_alarm_ringing)
+    {
+        alarm_set_background_locked(g_alarm_flash_on ? lv_color_hex(0x707000) : lv_color_hex(0x000000));
+    }
+    else
+    {
+        alarm_set_background_locked(lv_color_hex(0x000000));
+    }
+}
+
+static void alarm_sound_task(void *arg)
+{
+    (void)arg;
+
+    while (g_alarm_ringing)
+    {
+        audio_play_beep_ms(150);
+        if (!g_alarm_ringing)
+            break;
+        vTaskDelay(pdMS_TO_TICKS(220));
+
+        audio_play_beep_ms(150);
+        if (!g_alarm_ringing)
+            break;
+        vTaskDelay(pdMS_TO_TICKS(700));
+    }
+
+    g_alarm_sound_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void alarm_start(void)
+{
+    if (g_alarm_ringing)
+    {
+        return;
+    }
+
+    g_alarm_ringing = true;
+    g_alarm_flash_on = true;
+    g_alarm_last_flash_us = esp_timer_get_time();
+
+    if (g_alarm.repeat == ALARM_REPEAT_ONCE && g_alarm.enabled)
+    {
+        g_alarm.enabled = false;
+        alarm_save_to_nvs();
+    }
+
+    if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        alarm_apply_background_state_locked();
+        xSemaphoreGive(lvgl_mutex);
+    }
+
+    if (g_alarm_sound_task_handle == NULL)
+    {
+        xTaskCreatePinnedToCore(alarm_sound_task, "alarm_sound", 4096, NULL, 4, &g_alarm_sound_task_handle, 1);
+    }
+
+    ESP_LOGI(TAG, "鬧鐘開始響鈴");
+}
+
+static void alarm_stop(void)
+{
+    if (!g_alarm_ringing)
+    {
+        return;
+    }
+
+    g_alarm_ringing = false;
+    g_alarm_flash_on = false;
+
+    if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        alarm_apply_background_state_locked();
+        xSemaphoreGive(lvgl_mutex);
+    }
+
+    update_ui();
+    ESP_LOGI(TAG, "鬧鐘已停止");
+}
+
+static void alarm_check_trigger(void)
+{
+    if (g_app_mode != APP_MODE_CLOCK)
+        return;
+    if (is_setting_time || g_alarm_setting_mode || g_alarm_ringing)
+        return;
+    if (!g_alarm.enabled)
+        return;
+    if (!g_time_base_valid)
+        return;
+
+    time_t now = time(NULL);
+    struct tm t;
+    if (localtime_r(&now, &t) == NULL)
+        return;
+
+    if (t.tm_hour == g_alarm.hour && t.tm_min == g_alarm.minute)
+    {
+        if (!alarm_same_as_last_trigger(&t))
+        {
+            alarm_mark_triggered(&t);
+            alarm_start();
+        }
+    }
+}
+
+static void alarm_update_flash_effect(void)
+{
+    if (!g_alarm_ringing)
+    {
+        return;
+    }
+
+    int64_t now_us = esp_timer_get_time();
+    if ((now_us - g_alarm_last_flash_us) >= ALARM_FLASH_PERIOD_US)
+    {
+        g_alarm_last_flash_us = now_us;
+        g_alarm_flash_on = !g_alarm_flash_on;
+
+        if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(20)) == pdTRUE)
+        {
+            alarm_apply_background_state_locked();
+            xSemaphoreGive(lvgl_mutex);
+        }
+    }
+}
+
+static void create_alarm_overlay(lv_obj_t *scr)
+{
+    alarm_overlay = lv_obj_create(scr);
+    lv_obj_set_size(alarm_overlay, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_center(alarm_overlay);
+    lv_obj_set_style_bg_color(alarm_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(alarm_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(alarm_overlay, 0, 0);
+    lv_obj_set_style_pad_all(alarm_overlay, 0, 0);
+    lv_obj_clear_flag(alarm_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
+
+    alarm_title_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_title_label, DISPLAY_WIDTH - 8);
+    lv_label_set_long_mode(alarm_title_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(alarm_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(alarm_title_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(alarm_title_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(alarm_title_label, "ALARM SET");
+    lv_obj_set_pos(alarm_title_label, 4, 4);
+
+    /* 時間固定欄位：HH : MM */
+    alarm_hour_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_hour_label, 34);
+    lv_obj_set_style_text_align(alarm_hour_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(alarm_hour_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(alarm_hour_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(alarm_hour_label, "07");
+    lv_obj_set_pos(alarm_hour_label, 36, 24);
+
+    alarm_colon_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_colon_label, 12);
+    lv_obj_set_style_text_align(alarm_colon_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(alarm_colon_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(alarm_colon_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(alarm_colon_label, ":");
+    lv_obj_set_pos(alarm_colon_label, 74, 24);
+
+    alarm_minute_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_minute_label, 34);
+    lv_obj_set_style_text_align(alarm_minute_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(alarm_minute_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(alarm_minute_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(alarm_minute_label, "00");
+    lv_obj_set_pos(alarm_minute_label, 88, 24);
+
+    /* 狀態固定欄位：ON/OFF + ONCE/DAILY */
+    alarm_enable_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_enable_label, 40);
+    lv_obj_set_style_text_align(alarm_enable_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(alarm_enable_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(alarm_enable_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(alarm_enable_label, "ON");
+    lv_obj_set_pos(alarm_enable_label, 24, 56);
+
+    alarm_repeat_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_repeat_label, 64);
+    lv_obj_set_style_text_align(alarm_repeat_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(alarm_repeat_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(alarm_repeat_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(alarm_repeat_label, "DAILY");
+    lv_obj_set_pos(alarm_repeat_label, 72, 56);
+
+    alarm_help_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_help_label, DISPLAY_WIDTH - 8);
+    lv_label_set_long_mode(alarm_help_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(alarm_help_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(alarm_help_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(alarm_help_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(alarm_help_label, "UP/DOWN adj  CENTER next/save");
+    lv_obj_set_pos(alarm_help_label, 4, 70);
+}
+
+static void update_alarm_overlay_locked(void)
+{
+    if (alarm_overlay == NULL)
+    {
+        return;
+    }
+
+    if (!g_alarm_setting_mode)
+    {
+        lv_obj_add_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    bool blink_on = ((esp_timer_get_time() / SETTING_BLINK_PERIOD_US) % 2) == 0;
+
+    bool show_enable = true;
+    bool show_repeat = true;
+    bool show_hour = true;
+    bool show_minute = true;
+
+    if (!blink_on)
+    {
+        switch (g_alarm_set_field)
+        {
+        case ALARM_FIELD_ENABLE:
+            show_enable = false;
+            break;
+        case ALARM_FIELD_REPEAT:
+            show_repeat = false;
+            break;
+        case ALARM_FIELD_HOUR:
+            show_hour = false;
+            break;
+        case ALARM_FIELD_MINUTE:
+            show_minute = false;
+            break;
+        }
+    }
+
+    lv_label_set_text(alarm_title_label, "ALARM SET");
+
+    if (show_hour)
+    {
+        lv_label_set_text_fmt(alarm_hour_label, "%02d", g_alarm_edit.hour);
+    }
+    else
+    {
+        lv_label_set_text(alarm_hour_label, "  ");
+    }
+
+    lv_label_set_text(alarm_colon_label, ":");
+
+    if (show_minute)
+    {
+        lv_label_set_text_fmt(alarm_minute_label, "%02d", g_alarm_edit.minute);
+    }
+    else
+    {
+        lv_label_set_text(alarm_minute_label, "  ");
+    }
+
+    if (show_enable)
+    {
+        lv_label_set_text(alarm_enable_label, g_alarm_edit.enabled ? "ON" : "OFF");
+    }
+    else
+    {
+        lv_label_set_text(alarm_enable_label, "   ");
+    }
+
+    if (show_repeat)
+    {
+        lv_label_set_text(alarm_repeat_label, alarm_repeat_text(g_alarm_edit.repeat));
+    }
+    else
+    {
+        lv_label_set_text(alarm_repeat_label, "     ");
+    }
+
+    lv_obj_clear_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(alarm_overlay);
+}
+
+static void enter_alarm_setting_mode(void)
+{
+    g_alarm_edit = g_alarm;
+    g_alarm_setting_mode = true;
+    g_alarm_set_field = ALARM_FIELD_ENABLE;
+    current_panel = PANEL_ANALOG;
+
+    ESP_LOGI(TAG, "進入鬧鐘設定模式");
+
+    if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        update_alarm_overlay_locked();
+        xSemaphoreGive(lvgl_mutex);
+    }
+
+    update_ui();
+}
+
+static void save_alarm_setting_and_exit(void)
+{
+    g_alarm = g_alarm_edit;
+    g_alarm_setting_mode = false;
+    alarm_save_to_nvs();
+
+    if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        update_alarm_overlay_locked();
+        xSemaphoreGive(lvgl_mutex);
+    }
+
+    ESP_LOGI(TAG, "鬧鐘設定已保存");
+    update_ui();
+}
+
+static void adjust_alarm_field(int delta)
+{
+    switch (g_alarm_set_field)
+    {
+    case ALARM_FIELD_ENABLE:
+        g_alarm_edit.enabled = !g_alarm_edit.enabled;
+        ESP_LOGI(TAG, "鬧鐘啟用: %s", g_alarm_edit.enabled ? "ON" : "OFF");
+        break;
+
+    case ALARM_FIELD_REPEAT:
+        g_alarm_edit.repeat = (g_alarm_edit.repeat == ALARM_REPEAT_ONCE) ? ALARM_REPEAT_DAILY : ALARM_REPEAT_ONCE;
+        ESP_LOGI(TAG, "鬧鐘週期: %s", alarm_repeat_text(g_alarm_edit.repeat));
+        break;
+
+    case ALARM_FIELD_HOUR:
+        g_alarm_edit.hour = (g_alarm_edit.hour + delta + 24) % 24;
+        ESP_LOGI(TAG, "鬧鐘小時: %d", g_alarm_edit.hour);
+        break;
+
+    case ALARM_FIELD_MINUTE:
+        g_alarm_edit.minute = (g_alarm_edit.minute + delta + 60) % 60;
+        ESP_LOGI(TAG, "鬧鐘分鐘: %d", g_alarm_edit.minute);
+        break;
+    }
+
+    if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+    {
+        update_alarm_overlay_locked();
+        xSemaphoreGive(lvgl_mutex);
+    }
+}
+
+static void advance_alarm_field(void)
+{
+    switch (g_alarm_set_field)
+    {
+    case ALARM_FIELD_ENABLE:
+        g_alarm_set_field = ALARM_FIELD_REPEAT;
+        break;
+    case ALARM_FIELD_REPEAT:
+        g_alarm_set_field = ALARM_FIELD_HOUR;
+        break;
+    case ALARM_FIELD_HOUR:
+        g_alarm_set_field = ALARM_FIELD_MINUTE;
+        break;
+    case ALARM_FIELD_MINUTE:
+    default:
+        g_alarm_set_field = ALARM_FIELD_ENABLE;
+        break;
+    }
+
+    if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+    {
+        update_alarm_overlay_locked();
+        xSemaphoreGive(lvgl_mutex);
+    }
+}
+
+/* =========================
+ * Time setting
+ * ========================= */
+static void enter_time_setting_mode(void)
+{
+    time_t now = time(NULL);
+
+    if (localtime_r(&now, &time_setting) == NULL)
+    {
+        ESP_LOGW(TAG, "讀取目前系統時間失敗");
+        time_setting = (struct tm){0};
+    }
+
+    is_setting_time = true;
+    current_set_field = SET_FIELD_HOUR;
+    current_panel = PANEL_DIGITAL;
+    ESP_LOGI(TAG, "進入時間設置模式");
+}
+
+static void save_time_setting_and_exit(void)
+{
+    time_setting.tm_isdst = -1;
+
+    time_t new_time = mktime(&time_setting);
+    if (new_time != (time_t)-1)
+    {
+        struct timeval tv = {
+            .tv_sec = new_time,
+            .tv_usec = 0};
+        settimeofday(&tv, NULL);
+        rtc_save_to_nvs();
+
+        g_time_base_valid = true;
+        s_rtc_time_valid = true;
+
+        ESP_LOGI(TAG, "時間設置已保存");
+    }
+    else
+    {
+        ESP_LOGE(TAG, "mktime 失敗，未保存時間");
+    }
+
+    is_setting_time = false;
+    current_set_field = SET_FIELD_HOUR;
+    current_panel = PANEL_DIGITAL;
+}
+
+static void adjust_current_field(int delta)
+{
+    switch (current_set_field)
+    {
+    case SET_FIELD_HOUR:
+        time_setting.tm_hour = (time_setting.tm_hour + delta + 24) % 24;
+        ESP_LOGI(TAG, "設定小時: %d", time_setting.tm_hour);
+        break;
+
+    case SET_FIELD_MINUTE:
+        time_setting.tm_min = (time_setting.tm_min + delta + 60) % 60;
+        ESP_LOGI(TAG, "設定分鐘: %d", time_setting.tm_min);
+        break;
+
+    case SET_FIELD_SECOND:
+        time_setting.tm_sec = (time_setting.tm_sec + delta + 60) % 60;
+        ESP_LOGI(TAG, "設定秒鐘: %d", time_setting.tm_sec);
+        break;
+    }
+}
+
+static void advance_setting_field(void)
+{
+    switch (current_set_field)
+    {
+    case SET_FIELD_HOUR:
+        current_set_field = SET_FIELD_MINUTE;
+        ESP_LOGI(TAG, "切換到分鐘設定");
+        break;
+
+    case SET_FIELD_MINUTE:
+        current_set_field = SET_FIELD_SECOND;
+        ESP_LOGI(TAG, "切換到秒鐘設定");
+        break;
+
+    case SET_FIELD_SECOND:
+        current_set_field = SET_FIELD_HOUR;
+        ESP_LOGI(TAG, "切換到小時設定");
+        break;
+    }
+}
+
+/* =========================
+ * UI helpers
+ * ========================= */
 static const char *weekday_name(int wday)
 {
     static const char *names[] = {
@@ -340,6 +1124,10 @@ static const char *get_top_status_text(void)
     if (g_app_mode == APP_MODE_WIFI_PORTAL)
     {
         return "SETUP";
+    }
+    else if (g_alarm_setting_mode)
+    {
+        return "ALARM";
     }
     else if (is_setting_time)
     {
@@ -653,6 +1441,11 @@ static bool has_valid_display_time(void)
         return true;
     }
 
+    if (g_alarm_setting_mode)
+    {
+        return true;
+    }
+
     if (g_time_syncing && g_force_unknown_during_sync)
     {
         return false;
@@ -668,7 +1461,13 @@ static void set_weather_text(void)
 
     if (weather_label != NULL)
     {
-        if (is_setting_time)
+        if (g_alarm_setting_mode)
+        {
+            lv_obj_set_style_text_color(weather_label, lv_color_hex(0xAAAAAA), 0);
+            lv_label_set_text(weather_label, "Alarm Setting");
+            return;
+        }
+        else if (is_setting_time)
         {
             lv_obj_set_style_text_color(weather_label, lv_color_hex(0xAAAAAA), 0);
             lv_label_set_text(weather_label, get_setting_status_text());
@@ -712,15 +1511,13 @@ static void set_weather_text(void)
 
         if (analog_temp_label != NULL)
         {
-            snprintf(buf, sizeof(buf), "%.1f" DEGREE_UTF8 "C",
-                     info.temperature_c);
+            snprintf(buf, sizeof(buf), "%.1f" DEGREE_UTF8 "C", info.temperature_c);
             lv_label_set_text(analog_temp_label, buf);
         }
 
         if (analog_humidity_label != NULL)
         {
-            snprintf(buf, sizeof(buf), "%d%%RH",
-                     info.humidity_percent);
+            snprintf(buf, sizeof(buf), "%d%%RH", info.humidity_percent);
             lv_label_set_text(analog_humidity_label, buf);
         }
     }
@@ -788,6 +1585,77 @@ static void update_portal_ui(void)
     }
 }
 
+/* =========================
+ * Deep sleep / manual resync
+ * ========================= */
+static void enter_deep_sleep(void)
+{
+    if (is_setting_time || g_alarm_setting_mode)
+    {
+        ESP_LOGI(TAG, "設定模式中，不進入 Deep Sleep");
+        return;
+    }
+
+    s_rtc_time_valid = g_time_base_valid;
+
+    ESP_LOGI(TAG, "準備進入 Deep Sleep，等待 CENTER 放開...");
+
+    display_prepare_for_sleep();
+
+    while (gpio_get_level(BUTTON_CENTER) == 0)
+    {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    if (wifi_portal_is_running())
+    {
+        wifi_portal_stop();
+        wifi_disconnect();
+    }
+    else
+    {
+        wifi_disconnect();
+    }
+
+    rtc_gpio_pullup_en(GPIO_NUM_0);
+    rtc_gpio_pulldown_dis(GPIO_NUM_0);
+
+    ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0));
+
+    ESP_LOGI(TAG, "已進入 Deep Sleep，按下 CENTER 可喚醒");
+    vTaskDelay(pdMS_TO_TICKS(20));
+    esp_deep_sleep_start();
+}
+
+static void start_manual_resync(void)
+{
+    if (g_app_mode == APP_MODE_WIFI_PORTAL)
+    {
+        ESP_LOGI(TAG, "目前在配網模式中，忽略手動重同步要求");
+        return;
+    }
+
+    if (is_setting_time || g_alarm_setting_mode)
+    {
+        ESP_LOGI(TAG, "目前在設定模式中，忽略手動重同步要求");
+        return;
+    }
+
+    if (!g_wifi_credentials_loaded)
+    {
+        ESP_LOGW(TAG, "尚未設定 Wi-Fi，無法手動重同步");
+        return;
+    }
+
+    ESP_LOGI(TAG, "手動觸發 NTP / Weather 重新同步");
+    start_network_sync_task(true);
+}
+
+/* =========================
+ * UI creation
+ * ========================= */
 static void create_boot_overlay(lv_obj_t *scr)
 {
     boot_overlay = lv_obj_create(scr);
@@ -864,157 +1732,6 @@ static void hide_boot_overlay(void)
     {
         lv_obj_add_flag(boot_overlay, LV_OBJ_FLAG_HIDDEN);
     }
-}
-
-static void enter_time_setting_mode(void)
-{
-    time_t now = time(NULL);
-
-    if (localtime_r(&now, &time_setting) == NULL)
-    {
-        ESP_LOGW(TAG, "讀取目前系統時間失敗");
-        time_setting = (struct tm){0};
-    }
-
-    is_setting_time = true;
-    current_set_field = SET_FIELD_HOUR;
-    current_panel = PANEL_DIGITAL;
-    ESP_LOGI(TAG, "進入時間設置模式");
-}
-
-static void save_time_setting_and_exit(void)
-{
-    time_setting.tm_isdst = -1;
-
-    time_t new_time = mktime(&time_setting);
-    if (new_time != (time_t)-1)
-    {
-        struct timeval tv = {
-            .tv_sec = new_time,
-            .tv_usec = 0};
-        settimeofday(&tv, NULL);
-        rtc_save_to_nvs();
-
-        g_time_base_valid = true;
-        s_rtc_time_valid = true;
-
-        ESP_LOGI(TAG, "時間設置已保存");
-    }
-    else
-    {
-        ESP_LOGE(TAG, "mktime 失敗，未保存時間");
-    }
-
-    is_setting_time = false;
-    current_set_field = SET_FIELD_HOUR;
-    current_panel = PANEL_DIGITAL;
-}
-
-static void adjust_current_field(int delta)
-{
-    switch (current_set_field)
-    {
-    case SET_FIELD_HOUR:
-        time_setting.tm_hour = (time_setting.tm_hour + delta + 24) % 24;
-        ESP_LOGI(TAG, "設定小時: %d", time_setting.tm_hour);
-        break;
-
-    case SET_FIELD_MINUTE:
-        time_setting.tm_min = (time_setting.tm_min + delta + 60) % 60;
-        ESP_LOGI(TAG, "設定分鐘: %d", time_setting.tm_min);
-        break;
-
-    case SET_FIELD_SECOND:
-        time_setting.tm_sec = (time_setting.tm_sec + delta + 60) % 60;
-        ESP_LOGI(TAG, "設定秒鐘: %d", time_setting.tm_sec);
-        break;
-    }
-}
-
-static void advance_setting_field(void)
-{
-    switch (current_set_field)
-    {
-    case SET_FIELD_HOUR:
-        current_set_field = SET_FIELD_MINUTE;
-        ESP_LOGI(TAG, "切換到分鐘設定");
-        break;
-
-    case SET_FIELD_MINUTE:
-        current_set_field = SET_FIELD_SECOND;
-        ESP_LOGI(TAG, "切換到秒鐘設定");
-        break;
-
-    case SET_FIELD_SECOND:
-        current_set_field = SET_FIELD_HOUR;
-        ESP_LOGI(TAG, "切換到小時設定");
-        break;
-    }
-}
-
-static void enter_deep_sleep(void)
-{
-    if (is_setting_time)
-    {
-        ESP_LOGI(TAG, "設時模式中，不進入 Deep Sleep");
-        return;
-    }
-
-    s_rtc_time_valid = g_time_base_valid;
-
-    ESP_LOGI(TAG, "準備進入 Deep Sleep，等待 CENTER 放開...");
-
-    display_prepare_for_sleep();
-
-    while (gpio_get_level(BUTTON_CENTER) == 0)
-    {
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(50));
-
-    if (wifi_portal_is_running())
-    {
-        wifi_portal_stop();
-        wifi_disconnect();
-    }
-    else
-    {
-        wifi_disconnect();
-    }
-
-    rtc_gpio_pullup_en(GPIO_NUM_0);
-    rtc_gpio_pulldown_dis(GPIO_NUM_0);
-
-    ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0));
-
-    ESP_LOGI(TAG, "已進入 Deep Sleep，按下 CENTER 可喚醒");
-    vTaskDelay(pdMS_TO_TICKS(20));
-    esp_deep_sleep_start();
-}
-
-static void start_manual_resync(void)
-{
-    if (g_app_mode == APP_MODE_WIFI_PORTAL)
-    {
-        ESP_LOGI(TAG, "目前在配網模式中，忽略手動重同步要求");
-        return;
-    }
-
-    if (is_setting_time)
-    {
-        ESP_LOGI(TAG, "目前在設時模式中，忽略手動重同步要求");
-        return;
-    }
-
-    if (!g_wifi_credentials_loaded)
-    {
-        ESP_LOGW(TAG, "尚未設定 Wi-Fi，無法手動重同步");
-        return;
-    }
-
-    ESP_LOGI(TAG, "手動觸發 NTP / Weather 重新同步");
-    start_network_sync_task(true);
 }
 
 static void create_digital_ui(lv_obj_t *scr)
@@ -1304,10 +2021,12 @@ static void update_ui(void)
     if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
         update_panel_visibility();
+        alarm_apply_background_state_locked();
 
         if (g_app_mode == APP_MODE_WIFI_PORTAL)
         {
             update_portal_ui();
+            update_alarm_overlay_locked();
             xSemaphoreGive(lvgl_mutex);
             return;
         }
@@ -1331,6 +2050,7 @@ static void update_ui(void)
         }
 
         set_weather_text();
+        update_alarm_overlay_locked();
 
         xSemaphoreGive(lvgl_mutex);
     }
@@ -1341,6 +2061,7 @@ static void lvgl_task(void *arg)
     (void)arg;
 
     uint32_t ui_elapsed_ms = 0;
+    uint32_t alarm_check_elapsed_ms = 0;
 
     vTaskDelay(pdMS_TO_TICKS(300));
 
@@ -1353,14 +2074,23 @@ static void lvgl_task(void *arg)
         }
 
         ui_elapsed_ms += 10;
+        alarm_check_elapsed_ms += 10;
 
-        uint32_t target_period = is_setting_time ? UI_UPDATE_PERIOD_SETTING_MS
-                                                 : UI_UPDATE_PERIOD_NORMAL_MS;
+        alarm_update_flash_effect();
+
+        uint32_t target_period = (is_setting_time || g_alarm_setting_mode) ? UI_UPDATE_PERIOD_SETTING_MS
+                                                                           : UI_UPDATE_PERIOD_NORMAL_MS;
 
         if (ui_elapsed_ms >= target_period)
         {
             ui_elapsed_ms = 0;
             update_ui();
+        }
+
+        if (alarm_check_elapsed_ms >= 1000)
+        {
+            alarm_check_elapsed_ms = 0;
+            alarm_check_trigger();
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -1414,8 +2144,17 @@ static void network_time_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* =========================
+ * Button events
+ * ========================= */
 void button_event_callback(uint8_t button_id, uint8_t event_type)
 {
+    if (g_alarm_ringing)
+    {
+        alarm_stop();
+        return;
+    }
+
     if (g_app_mode == APP_MODE_WIFI_PORTAL)
     {
         if (event_type == BUTTON_VERY_LONG_PRESS && button_id == BUTTON_CENTER)
@@ -1425,8 +2164,30 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
         return;
     }
 
-    if (event_type == BUTTON_SHORT_PRESS)
+    if (event_type == BUTTON_SHORT_PRESS || event_type == BUTTON_REPEAT_PRESS)
     {
+        if (g_alarm_setting_mode)
+        {
+            switch (button_id)
+            {
+            case BUTTON_UP:
+                adjust_alarm_field(+1);
+                break;
+
+            case BUTTON_DOWN:
+                adjust_alarm_field(-1);
+                break;
+
+            case BUTTON_CENTER:
+                if (event_type == BUTTON_SHORT_PRESS)
+                {
+                    advance_alarm_field();
+                }
+                break;
+            }
+            return;
+        }
+
         if (is_setting_time)
         {
             switch (button_id)
@@ -1440,11 +2201,16 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
                 break;
 
             case BUTTON_CENTER:
-                advance_setting_field();
+                if (event_type == BUTTON_SHORT_PRESS)
+                {
+                    advance_setting_field();
+                }
                 break;
             }
+            return;
         }
-        else
+
+        if (event_type == BUTTON_SHORT_PRESS)
         {
             switch (button_id)
             {
@@ -1468,7 +2234,11 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
     {
         if (button_id == BUTTON_CENTER)
         {
-            if (!is_setting_time)
+            if (g_alarm_setting_mode)
+            {
+                save_alarm_setting_and_exit();
+            }
+            else if (!is_setting_time)
             {
                 if (current_panel == PANEL_DIGITAL)
                 {
@@ -1476,7 +2246,7 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
                 }
                 else
                 {
-                    ESP_LOGI(TAG, "目前為類比時鐘畫面，不進入設時模式");
+                    enter_alarm_setting_mode();
                 }
             }
             else
@@ -1494,6 +2264,9 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
     }
 }
 
+/* =========================
+ * app_main
+ * ========================= */
 void app_main(void)
 {
     esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
@@ -1572,6 +2345,8 @@ void app_main(void)
     ESP_LOGI(TAG, "初始化 Weather 模組...");
     weather_init();
 
+    alarm_load_from_nvs();
+
     if (woke_from_deep_sleep && s_rtc_time_valid)
     {
         g_time_base_valid = true;
@@ -1600,6 +2375,7 @@ void app_main(void)
         create_analog_ui(scr);
         create_portal_ui(scr);
         create_boot_overlay(scr);
+        create_alarm_overlay(scr);
         update_panel_visibility();
 
         if (g_boot_hint != BOOT_HINT_NONE)
@@ -1624,7 +2400,6 @@ void app_main(void)
     }
     else
     {
-        /* 修正同步啟動 bug：這裡不要先設成 true */
         g_time_syncing = false;
         g_force_unknown_during_sync = true;
         g_wifi_failed = false;
