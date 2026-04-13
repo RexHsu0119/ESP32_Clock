@@ -42,6 +42,7 @@ typedef enum
 {
     PANEL_DIGITAL = 0,
     PANEL_ANALOG,
+    PANEL_CALENDAR,
 } clock_panel_t;
 
 typedef enum
@@ -77,6 +78,24 @@ typedef enum
     ALARM_FIELD_HOUR,
     ALARM_FIELD_MINUTE,
 } alarm_set_field_t;
+
+typedef enum
+{
+    MENU_ITEM_ALARM = 0,
+    MENU_ITEM_SET_TIME,
+    MENU_ITEM_CALENDAR,
+    MENU_ITEM_WIFI_SETUP,
+    MENU_ITEM_CLEAR_WIFI,
+    MENU_ITEM_SYNC_NOW,
+    MENU_ITEM_DEEP_SLEEP,
+    MENU_ITEM_COUNT,
+} menu_item_t;
+
+typedef enum
+{
+    CONFIRM_NONE = 0,
+    CONFIRM_CLEAR_WIFI,
+} confirm_action_t;
 
 typedef struct
 {
@@ -134,7 +153,33 @@ static bool g_wifi_credentials_loaded = false;
 /* LVGL 物件 */
 static lv_obj_t *digital_container = NULL;
 static lv_obj_t *analog_container = NULL;
+static lv_obj_t *calendar_container = NULL;
 static lv_obj_t *portal_container = NULL;
+
+/* Menu overlay */
+static lv_obj_t *menu_overlay = NULL;
+static lv_obj_t *menu_title_label = NULL;
+static lv_obj_t *menu_help_label = NULL;
+static lv_obj_t *menu_item_labels[4] = {0};
+
+static bool g_menu_open = false;
+static menu_item_t g_menu_selected = MENU_ITEM_ALARM;
+static int g_menu_top_index = 0;
+static volatile bool g_request_open_wifi_setup = false;
+static volatile bool g_request_clear_wifi = false;
+static clock_panel_t g_last_clock_panel_before_calendar = PANEL_DIGITAL;
+
+/* Confirm overlay */
+static lv_obj_t *confirm_overlay = NULL;
+static lv_obj_t *confirm_title_label = NULL;
+static lv_obj_t *confirm_msg_label = NULL;
+static lv_obj_t *confirm_no_label = NULL;
+static lv_obj_t *confirm_yes_label = NULL;
+static lv_obj_t *confirm_help_label = NULL;
+
+static bool g_confirm_open = false;
+static confirm_action_t g_confirm_action = CONFIRM_NONE;
+static bool g_confirm_yes_selected = false;
 
 /* 開機提示 overlay */
 static lv_obj_t *boot_overlay = NULL;
@@ -176,6 +221,17 @@ static lv_obj_t *analog_weekday_label = NULL;
 
 /* 類比錶面：底部單一資訊列 */
 static lv_obj_t *analog_weather_label = NULL;
+
+/* 萬年曆畫面 */
+static lv_obj_t *calendar_title_label = NULL;
+static lv_obj_t *calendar_month_label = NULL;
+static lv_obj_t *calendar_weekday_labels[7] = {0};
+static lv_obj_t *calendar_day_labels[6][7] = {0};
+static lv_obj_t *calendar_footer_label = NULL;
+
+/* 萬年曆目前瀏覽月份 */
+static int g_calendar_year = 0;
+static int g_calendar_month = 0; /* 1~12 */
 
 /* 配網畫面 */
 static lv_obj_t *portal_title_label = NULL;
@@ -263,6 +319,20 @@ static bool s_audio_inited = false;
 static void update_ui(void);
 static void network_time_task(void *arg);
 static void update_alarm_overlay_locked(void);
+static void update_calendar_ui_locked(bool valid_time);
+static void create_menu_overlay(lv_obj_t *scr);
+static void update_menu_overlay_locked(void);
+static void menu_open(void);
+static void menu_close(void);
+static void menu_move(int delta);
+static void menu_execute_selected(void);
+static void start_manual_resync(void);
+
+static void create_confirm_overlay(lv_obj_t *scr);
+static void update_confirm_overlay_locked(void);
+static void confirm_open(confirm_action_t action);
+static void confirm_close(void);
+static void confirm_execute(void);
 
 static void lvgl_tick_cb(void *arg)
 {
@@ -919,6 +989,278 @@ static void advance_alarm_field(void)
 }
 
 /* =========================
+ * Calendar helpers
+ * ========================= */
+static bool calendar_is_leap_year(int year)
+{
+    return ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0));
+}
+
+static int calendar_days_in_month(int year, int month)
+{
+    static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+
+    if (month < 1 || month > 12)
+    {
+        return 30;
+    }
+
+    if (month == 2 && calendar_is_leap_year(year))
+    {
+        return 29;
+    }
+
+    return days[month - 1];
+}
+
+static int calendar_first_wday(int year, int month)
+{
+    struct tm t = {0};
+    t.tm_year = year - 1900;
+    t.tm_mon = month - 1;
+    t.tm_mday = 1;
+    t.tm_hour = 12;
+    t.tm_isdst = -1;
+
+    time_t ts = mktime(&t);
+    if (ts == (time_t)-1)
+    {
+        return 0;
+    }
+
+    if (localtime_r(&ts, &t) == NULL)
+    {
+        return 0;
+    }
+
+    return t.tm_wday; /* 0=Sun */
+}
+
+static void calendar_reset_to_current_month(void)
+{
+    time_t now = time(NULL);
+    struct tm t;
+
+    if (localtime_r(&now, &t) != NULL)
+    {
+        g_calendar_year = t.tm_year + 1900;
+        g_calendar_month = t.tm_mon + 1;
+    }
+    else
+    {
+        g_calendar_year = 2025;
+        g_calendar_month = 1;
+    }
+}
+
+static void calendar_ensure_initialized(void)
+{
+    if (g_calendar_year <= 0 || g_calendar_month < 1 || g_calendar_month > 12)
+    {
+        calendar_reset_to_current_month();
+    }
+}
+
+static void calendar_change_month(int delta)
+{
+    calendar_ensure_initialized();
+
+    g_calendar_month += delta;
+
+    while (g_calendar_month < 1)
+    {
+        g_calendar_month += 12;
+        g_calendar_year--;
+    }
+
+    while (g_calendar_month > 12)
+    {
+        g_calendar_month -= 12;
+        g_calendar_year++;
+    }
+
+    ESP_LOGI(TAG, "月曆切換到: %04d/%02d", g_calendar_year, g_calendar_month);
+}
+
+/* =========================
+ * Menu helpers
+ * ========================= */
+static const char *menu_item_text(menu_item_t item)
+{
+    static const char *texts[MENU_ITEM_COUNT] = {
+        "Alarm",
+        "Set Time",
+        "Calendar",
+        "Wi-Fi Setup",
+        "Clear Wi-Fi",
+        "Sync Now",
+        "Deep Sleep",
+    };
+
+    if (item < 0 || item >= MENU_ITEM_COUNT)
+    {
+        return "";
+    }
+
+    return texts[item];
+}
+
+static void menu_open(void)
+{
+    g_menu_open = true;
+
+    if (g_menu_selected < 0 || g_menu_selected >= MENU_ITEM_COUNT)
+    {
+        g_menu_selected = MENU_ITEM_ALARM;
+    }
+
+    if (g_menu_top_index < 0)
+    {
+        g_menu_top_index = 0;
+    }
+
+    if (g_menu_top_index > (MENU_ITEM_COUNT - 1))
+    {
+        g_menu_top_index = MENU_ITEM_COUNT - 1;
+    }
+
+    update_ui();
+}
+
+static void menu_close(void)
+{
+    g_menu_open = false;
+    update_ui();
+}
+
+static void menu_move(int delta)
+{
+    int sel = (int)g_menu_selected + delta;
+
+    if (sel < 0)
+    {
+        sel = 0;
+    }
+    if (sel >= MENU_ITEM_COUNT)
+    {
+        sel = MENU_ITEM_COUNT - 1;
+    }
+
+    g_menu_selected = (menu_item_t)sel;
+
+    if ((int)g_menu_selected < g_menu_top_index)
+    {
+        g_menu_top_index = (int)g_menu_selected;
+    }
+    else if ((int)g_menu_selected >= (g_menu_top_index + 4))
+    {
+        g_menu_top_index = (int)g_menu_selected - 3;
+    }
+
+    update_ui();
+}
+
+static void confirm_open(confirm_action_t action)
+{
+    g_confirm_action = action;
+    g_confirm_yes_selected = false;
+    g_confirm_open = true;
+    update_ui();
+}
+
+static void confirm_close(void)
+{
+    g_confirm_open = false;
+    g_confirm_action = CONFIRM_NONE;
+    g_confirm_yes_selected = false;
+    update_ui();
+}
+
+static void confirm_execute(void)
+{
+    if (!g_confirm_open)
+    {
+        return;
+    }
+
+    confirm_action_t action = g_confirm_action;
+    bool yes = g_confirm_yes_selected;
+
+    g_confirm_open = false;
+    g_confirm_action = CONFIRM_NONE;
+    g_confirm_yes_selected = false;
+
+    if (!yes)
+    {
+        update_ui();
+        return;
+    }
+
+    switch (action)
+    {
+    case CONFIRM_CLEAR_WIFI:
+        g_request_clear_wifi = true;
+        break;
+
+    case CONFIRM_NONE:
+    default:
+        break;
+    }
+
+    update_ui();
+}
+
+static void menu_execute_selected(void)
+{
+    menu_item_t item = g_menu_selected;
+    g_menu_open = false;
+
+    switch (item)
+    {
+    case MENU_ITEM_ALARM:
+        enter_alarm_setting_mode();
+        break;
+
+    case MENU_ITEM_SET_TIME:
+        enter_time_setting_mode();
+        update_ui();
+        break;
+
+    case MENU_ITEM_CALENDAR:
+        if (current_panel != PANEL_CALENDAR)
+        {
+            g_last_clock_panel_before_calendar = current_panel;
+        }
+        calendar_ensure_initialized();
+        current_panel = PANEL_CALENDAR;
+        update_ui();
+        break;
+
+    case MENU_ITEM_WIFI_SETUP:
+        g_request_open_wifi_setup = true;
+        update_ui();
+        break;
+
+    case MENU_ITEM_CLEAR_WIFI:
+        confirm_open(CONFIRM_CLEAR_WIFI);
+        break;
+
+    case MENU_ITEM_SYNC_NOW:
+        start_manual_resync();
+        update_ui();
+        break;
+
+    case MENU_ITEM_DEEP_SLEEP:
+        g_request_deep_sleep = true;
+        break;
+
+    default:
+        update_ui();
+        break;
+    }
+}
+
+/* =========================
  * UI helpers
  * ========================= */
 static const char *weekday_name(int wday)
@@ -1007,6 +1349,18 @@ static void update_panel_visibility(void)
         else
         {
             lv_obj_add_flag(analog_container, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    if (calendar_container != NULL)
+    {
+        if (g_app_mode == APP_MODE_CLOCK && current_panel == PANEL_CALENDAR)
+        {
+            lv_obj_clear_flag(calendar_container, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_add_flag(calendar_container, LV_OBJ_FLAG_HIDDEN);
         }
     }
 
@@ -1444,6 +1798,239 @@ static void update_portal_ui(void)
     }
 }
 
+static void update_calendar_ui_locked(bool valid_time)
+{
+    static const char *week_names[7] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
+
+    if (calendar_container == NULL || calendar_month_label == NULL)
+    {
+        return;
+    }
+
+    for (int i = 0; i < 7; i++)
+    {
+        if (calendar_weekday_labels[i] != NULL)
+        {
+            lv_label_set_text(calendar_weekday_labels[i], week_names[i]);
+        }
+    }
+
+    if (!valid_time)
+    {
+        lv_label_set_text(calendar_month_label, "----/--");
+
+        for (int r = 0; r < 6; r++)
+        {
+            for (int c = 0; c < 7; c++)
+            {
+                lv_obj_t *obj = calendar_day_labels[r][c];
+                if (obj != NULL)
+                {
+                    lv_label_set_text(obj, "");
+                    lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
+                    lv_obj_set_style_text_color(obj, lv_color_hex(0x555555), 0);
+                }
+            }
+        }
+
+        if (calendar_footer_label != NULL)
+        {
+            lv_label_set_text(calendar_footer_label, "No date");
+        }
+
+        return;
+    }
+
+    calendar_ensure_initialized();
+
+    lv_label_set_text_fmt(calendar_month_label, "%04d/%02d", g_calendar_year, g_calendar_month);
+
+    int first_wday = calendar_first_wday(g_calendar_year, g_calendar_month);
+    int days = calendar_days_in_month(g_calendar_year, g_calendar_month);
+
+    time_t now = time(NULL);
+    struct tm today;
+    bool has_today = (localtime_r(&now, &today) != NULL);
+
+    int day = 1;
+    for (int r = 0; r < 6; r++)
+    {
+        for (int c = 0; c < 7; c++)
+        {
+            int idx = r * 7 + c;
+            lv_obj_t *obj = calendar_day_labels[r][c];
+            if (obj == NULL)
+            {
+                continue;
+            }
+
+            if (idx < first_wday || day > days)
+            {
+                lv_label_set_text(obj, "");
+                lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
+                lv_obj_set_style_text_color(obj, lv_color_hex(0x555555), 0);
+            }
+            else
+            {
+                bool is_today = has_today &&
+                                (today.tm_year + 1900 == g_calendar_year) &&
+                                (today.tm_mon + 1 == g_calendar_month) &&
+                                (today.tm_mday == day);
+
+                lv_label_set_text_fmt(obj, "%d", day);
+                lv_obj_set_style_text_color(obj,
+                                            is_today ? lv_color_hex(0xFF4040) : lv_color_hex(0xFFFFFF),
+                                            0);
+
+                if (is_today)
+                {
+                    lv_obj_set_style_bg_color(obj, lv_color_hex(0x202020), 0);
+                    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+                    lv_obj_set_style_radius(obj, 4, 0);
+                }
+                else
+                {
+                    lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
+                }
+
+                day++;
+            }
+        }
+    }
+
+    if (calendar_footer_label != NULL)
+    {
+        lv_label_set_text(calendar_footer_label, "UP/DN month\nCENTER=today");
+    }
+}
+
+static void update_menu_overlay_locked(void)
+{
+    if (menu_overlay == NULL)
+    {
+        return;
+    }
+
+    if (!g_menu_open || g_app_mode != APP_MODE_CLOCK)
+    {
+        lv_obj_add_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    if (menu_title_label != NULL)
+    {
+        lv_label_set_text(menu_title_label, "MENU");
+    }
+
+    for (int i = 0; i < 4; i++)
+    {
+        int item_index = g_menu_top_index + i;
+
+        if (menu_item_labels[i] == NULL)
+        {
+            continue;
+        }
+
+        if (item_index >= MENU_ITEM_COUNT)
+        {
+            lv_label_set_text(menu_item_labels[i], "");
+            continue;
+        }
+
+        bool selected = (item_index == (int)g_menu_selected);
+
+        lv_label_set_text_fmt(menu_item_labels[i], "%c %s",
+                              selected ? '>' : ' ',
+                              menu_item_text((menu_item_t)item_index));
+
+        lv_obj_set_style_text_color(menu_item_labels[i],
+                                    selected ? lv_color_hex(0xFF4040) : lv_color_hex(0xFFFFFF),
+                                    0);
+
+        lv_obj_set_style_text_font(menu_item_labels[i],
+                                   selected ? &lv_font_montserrat_14 : &lv_font_montserrat_12,
+                                   0);
+    }
+
+    if (menu_help_label != NULL)
+    {
+        lv_label_set_text(menu_help_label, "UP/DN move\nCENTER enter/exit");
+    }
+
+    lv_obj_clear_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(menu_overlay);
+}
+
+static void update_confirm_overlay_locked(void)
+{
+    if (confirm_overlay == NULL)
+    {
+        return;
+    }
+
+    if (!g_confirm_open || g_app_mode != APP_MODE_CLOCK)
+    {
+        lv_obj_add_flag(confirm_overlay, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    switch (g_confirm_action)
+    {
+    case CONFIRM_CLEAR_WIFI:
+        if (confirm_title_label != NULL)
+        {
+            lv_label_set_text(confirm_title_label, "CLEAR WIFI");
+        }
+        if (confirm_msg_label != NULL)
+        {
+            lv_label_set_text(confirm_msg_label, "Erase saved Wi-Fi?");
+        }
+        break;
+
+    case CONFIRM_NONE:
+    default:
+        if (confirm_title_label != NULL)
+        {
+            lv_label_set_text(confirm_title_label, "CONFIRM");
+        }
+        if (confirm_msg_label != NULL)
+        {
+            lv_label_set_text(confirm_msg_label, "Are you sure?");
+        }
+        break;
+    }
+
+    if (confirm_no_label != NULL)
+    {
+        lv_label_set_text(confirm_no_label, g_confirm_yes_selected ? "  NO" : "> NO");
+        lv_obj_set_style_text_color(confirm_no_label,
+                                    g_confirm_yes_selected ? lv_color_hex(0xFFFFFF) : lv_color_hex(0xFF4040),
+                                    0);
+        lv_obj_set_style_text_font(confirm_no_label,
+                                   g_confirm_yes_selected ? &lv_font_montserrat_12 : &lv_font_montserrat_14,
+                                   0);
+    }
+
+    if (confirm_yes_label != NULL)
+    {
+        lv_label_set_text(confirm_yes_label, g_confirm_yes_selected ? "> YES" : "  YES");
+        lv_obj_set_style_text_color(confirm_yes_label,
+                                    g_confirm_yes_selected ? lv_color_hex(0xFF4040) : lv_color_hex(0xFFFFFF),
+                                    0);
+        lv_obj_set_style_text_font(confirm_yes_label,
+                                   g_confirm_yes_selected ? &lv_font_montserrat_14 : &lv_font_montserrat_12,
+                                   0);
+    }
+
+    if (confirm_help_label != NULL)
+    {
+        lv_label_set_text(confirm_help_label, "UP/DN select\nCENTER confirm");
+    }
+
+    lv_obj_clear_flag(confirm_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(confirm_overlay);
+}
+
 /* =========================
  * Deep sleep / manual resync
  * ========================= */
@@ -1527,7 +2114,6 @@ static void create_boot_overlay(lv_obj_t *scr)
     lv_obj_clear_flag(boot_overlay, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(boot_overlay, LV_OBJ_FLAG_HIDDEN);
 
-    /* 標題 */
     boot_overlay_title = lv_label_create(boot_overlay);
     lv_obj_set_width(boot_overlay_title, DISPLAY_WIDTH);
     lv_label_set_long_mode(boot_overlay_title, LV_LABEL_LONG_CLIP);
@@ -1537,7 +2123,6 @@ static void create_boot_overlay(lv_obj_t *scr)
     lv_label_set_text(boot_overlay_title, "FORCE SETUP");
     lv_obj_set_pos(boot_overlay_title, 0, 8);
 
-    /* 狀態提示 */
     boot_overlay_line1 = lv_label_create(boot_overlay);
     lv_obj_set_width(boot_overlay_line1, DISPLAY_WIDTH);
     lv_label_set_long_mode(boot_overlay_line1, LV_LABEL_LONG_CLIP);
@@ -1547,7 +2132,6 @@ static void create_boot_overlay(lv_obj_t *scr)
     lv_label_set_text(boot_overlay_line1, "Entering setup mode");
     lv_obj_set_pos(boot_overlay_line1, 0, 36);
 
-    /* AP */
     boot_overlay_line2 = lv_label_create(boot_overlay);
     lv_obj_set_width(boot_overlay_line2, DISPLAY_WIDTH);
     lv_label_set_long_mode(boot_overlay_line2, LV_LABEL_LONG_CLIP);
@@ -1557,7 +2141,6 @@ static void create_boot_overlay(lv_obj_t *scr)
     lv_label_set_text(boot_overlay_line2, "AP: ClockSetup");
     lv_obj_set_pos(boot_overlay_line2, 0, 60);
 
-    /* IP */
     boot_overlay_line3 = lv_label_create(boot_overlay);
     lv_obj_set_width(boot_overlay_line3, DISPLAY_WIDTH);
     lv_label_set_long_mode(boot_overlay_line3, LV_LABEL_LONG_CLIP);
@@ -1567,7 +2150,6 @@ static void create_boot_overlay(lv_obj_t *scr)
     lv_label_set_text(boot_overlay_line3, "IP: 192.168.4.1");
     lv_obj_set_pos(boot_overlay_line3, 0, 76);
 
-    /* 底部提示 */
     boot_overlay_line4 = lv_label_create(boot_overlay);
     lv_obj_set_width(boot_overlay_line4, DISPLAY_WIDTH);
     lv_label_set_long_mode(boot_overlay_line4, LV_LABEL_LONG_CLIP);
@@ -1639,7 +2221,6 @@ static void create_alarm_overlay(lv_obj_t *scr)
     lv_obj_clear_flag(alarm_overlay, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
 
-    /* 標題 */
     alarm_title_label = lv_label_create(alarm_overlay);
     lv_obj_set_width(alarm_title_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(alarm_title_label, LV_LABEL_LONG_CLIP);
@@ -1649,7 +2230,6 @@ static void create_alarm_overlay(lv_obj_t *scr)
     lv_label_set_text(alarm_title_label, "ALARM SET");
     lv_obj_set_pos(alarm_title_label, 0, 6);
 
-    /* 中間大時間：HH:MM */
     alarm_hour_label = lv_label_create(alarm_overlay);
     lv_obj_set_width(alarm_hour_label, 36);
     lv_obj_set_style_text_align(alarm_hour_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -1674,7 +2254,6 @@ static void create_alarm_overlay(lv_obj_t *scr)
     lv_label_set_text(alarm_minute_label, "00");
     lv_obj_set_pos(alarm_minute_label, 90, 28);
 
-    /* 固定前綴：Enable: */
     lv_obj_t *alarm_enable_prefix = lv_label_create(alarm_overlay);
     lv_obj_set_style_text_color(alarm_enable_prefix, lv_color_hex(0x00FFCC), 0);
     lv_obj_set_style_text_font(alarm_enable_prefix, &lv_font_montserrat_14, 0);
@@ -1689,7 +2268,6 @@ static void create_alarm_overlay(lv_obj_t *scr)
     lv_label_set_text(alarm_enable_label, "ON");
     lv_obj_set_pos(alarm_enable_label, 92, 64);
 
-    /* 固定前綴：Repeat: */
     lv_obj_t *alarm_repeat_prefix = lv_label_create(alarm_overlay);
     lv_obj_set_style_text_color(alarm_repeat_prefix, lv_color_hex(0x00FFCC), 0);
     lv_obj_set_style_text_font(alarm_repeat_prefix, &lv_font_montserrat_14, 0);
@@ -1704,7 +2282,6 @@ static void create_alarm_overlay(lv_obj_t *scr)
     lv_label_set_text(alarm_repeat_label, "DAILY");
     lv_obj_set_pos(alarm_repeat_label, 92, 82);
 
-    /* 底部兩列提示 */
     alarm_help_label = lv_label_create(alarm_overlay);
     lv_obj_set_width(alarm_help_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(alarm_help_label, LV_LABEL_LONG_WRAP);
@@ -1715,71 +2292,105 @@ static void create_alarm_overlay(lv_obj_t *scr)
     lv_obj_set_pos(alarm_help_label, 0, 104);
 }
 
-static void update_alarm_overlay_locked(void)
+static void create_menu_overlay(lv_obj_t *scr)
 {
-    if (alarm_overlay == NULL)
+    menu_overlay = lv_obj_create(scr);
+    lv_obj_set_size(menu_overlay, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_center(menu_overlay);
+    lv_obj_set_style_bg_color(menu_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(menu_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(menu_overlay, 0, 0);
+    lv_obj_set_style_pad_all(menu_overlay, 0, 0);
+    lv_obj_clear_flag(menu_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
+
+    menu_title_label = lv_label_create(menu_overlay);
+    lv_obj_set_width(menu_title_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(menu_title_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(menu_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(menu_title_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(menu_title_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(menu_title_label, "MENU");
+    lv_obj_set_pos(menu_title_label, 0, 6);
+
+    for (int i = 0; i < 4; i++)
     {
-        return;
+        menu_item_labels[i] = lv_label_create(menu_overlay);
+        lv_obj_set_width(menu_item_labels[i], DISPLAY_WIDTH - 20);
+        lv_label_set_long_mode(menu_item_labels[i], LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_align(menu_item_labels[i], LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_color(menu_item_labels[i], lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(menu_item_labels[i], &lv_font_montserrat_12, 0);
+        lv_label_set_text(menu_item_labels[i], "");
+        lv_obj_set_pos(menu_item_labels[i], 16, 30 + i * 16);
     }
 
-    if (!g_alarm_setting_mode)
-    {
-        lv_obj_add_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
-        return;
-    }
+    menu_help_label = lv_label_create(menu_overlay);
+    lv_obj_set_width(menu_help_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(menu_help_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(menu_help_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(menu_help_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(menu_help_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(menu_help_label, "UP/DN move\nCENTER enter/exit");
+    lv_obj_set_pos(menu_help_label, 0, 104);
+}
 
-    bool blink_on = ((esp_timer_get_time() / SETTING_BLINK_PERIOD_US) % 2) == 0;
+static void create_confirm_overlay(lv_obj_t *scr)
+{
+    confirm_overlay = lv_obj_create(scr);
+    lv_obj_set_size(confirm_overlay, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_center(confirm_overlay);
+    lv_obj_set_style_bg_color(confirm_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(confirm_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(confirm_overlay, 0, 0);
+    lv_obj_set_style_pad_all(confirm_overlay, 0, 0);
+    lv_obj_clear_flag(confirm_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(confirm_overlay, LV_OBJ_FLAG_HIDDEN);
 
-    bool show_enable = true;
-    bool show_repeat = true;
-    bool show_hour = true;
-    bool show_minute = true;
+    confirm_title_label = lv_label_create(confirm_overlay);
+    lv_obj_set_width(confirm_title_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(confirm_title_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(confirm_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(confirm_title_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(confirm_title_label, &lv_font_montserrat_16, 0);
+    lv_label_set_text(confirm_title_label, "CONFIRM");
+    lv_obj_set_pos(confirm_title_label, 0, 8);
 
-    if (!blink_on)
-    {
-        switch (g_alarm_set_field)
-        {
-        case ALARM_FIELD_ENABLE:
-            show_enable = false;
-            break;
-        case ALARM_FIELD_REPEAT:
-            show_repeat = false;
-            break;
-        case ALARM_FIELD_HOUR:
-            show_hour = false;
-            break;
-        case ALARM_FIELD_MINUTE:
-            show_minute = false;
-            break;
-        }
-    }
+    confirm_msg_label = lv_label_create(confirm_overlay);
+    lv_obj_set_width(confirm_msg_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(confirm_msg_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(confirm_msg_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(confirm_msg_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(confirm_msg_label, &lv_font_montserrat_12, 0);
+    lv_label_set_text(confirm_msg_label, "Are you sure?");
+    lv_obj_set_pos(confirm_msg_label, 0, 34);
 
-    lv_label_set_text(alarm_title_label, "ALARM SET");
+    confirm_no_label = lv_label_create(confirm_overlay);
+    lv_obj_set_width(confirm_no_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(confirm_no_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(confirm_no_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(confirm_no_label, lv_color_hex(0xFF4040), 0);
+    lv_obj_set_style_text_font(confirm_no_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(confirm_no_label, "> NO");
+    lv_obj_set_pos(confirm_no_label, 0, 68);
 
-    if (show_hour)
-        lv_label_set_text_fmt(alarm_hour_label, "%02d", g_alarm_edit.hour);
-    else
-        lv_label_set_text(alarm_hour_label, "  ");
+    confirm_yes_label = lv_label_create(confirm_overlay);
+    lv_obj_set_width(confirm_yes_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(confirm_yes_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(confirm_yes_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(confirm_yes_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(confirm_yes_label, &lv_font_montserrat_12, 0);
+    lv_label_set_text(confirm_yes_label, "  YES");
+    lv_obj_set_pos(confirm_yes_label, 0, 88);
 
-    lv_label_set_text(alarm_colon_label, ":");
-
-    if (show_minute)
-        lv_label_set_text_fmt(alarm_minute_label, "%02d", g_alarm_edit.minute);
-    else
-        lv_label_set_text(alarm_minute_label, "  ");
-
-    if (show_enable)
-        lv_label_set_text(alarm_enable_label, g_alarm_edit.enabled ? "ON" : "OFF");
-    else
-        lv_label_set_text(alarm_enable_label, "   ");
-
-    if (show_repeat)
-        lv_label_set_text(alarm_repeat_label, alarm_repeat_text(g_alarm_edit.repeat));
-    else
-        lv_label_set_text(alarm_repeat_label, "     ");
-
-    lv_obj_clear_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(alarm_overlay);
+    confirm_help_label = lv_label_create(confirm_overlay);
+    lv_obj_set_width(confirm_help_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(confirm_help_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(confirm_help_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(confirm_help_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(confirm_help_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(confirm_help_label, "UP/DN select\nCENTER confirm");
+    lv_obj_set_pos(confirm_help_label, 0, 108);
 }
 
 static void create_digital_ui(lv_obj_t *scr)
@@ -1973,7 +2584,6 @@ static void create_analog_ui(lv_obj_t *scr)
     lv_obj_set_style_border_width(center_dot, 0, 0);
     lv_obj_center(center_dot);
 
-    /* 和 digital 底部資訊使用同一個位置 */
     analog_weather_label = lv_label_create(analog_container);
     lv_obj_set_width(analog_weather_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(analog_weather_label, LV_LABEL_LONG_CLIP);
@@ -1982,6 +2592,78 @@ static void create_analog_ui(lv_obj_t *scr)
     lv_obj_set_style_text_font(analog_weather_label, &lv_font_montserrat_14, 0);
     lv_label_set_text(analog_weather_label, "__" DEGREE_UTF8 "C  __%RH");
     lv_obj_align(analog_weather_label, LV_ALIGN_BOTTOM_MID, 0, -2);
+}
+
+static void create_calendar_ui(lv_obj_t *scr)
+{
+    static const char *week_names[7] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
+    const int cell_w = 22;
+    const int cell_h = 10;
+    const int start_x = 3;
+    const int head_y = 42;
+    const int day_start_y = 56;
+    const int row_step = 9;
+
+    calendar_container = lv_obj_create(scr);
+    lv_obj_set_size(calendar_container, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_center(calendar_container);
+    lv_obj_set_style_bg_opa(calendar_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(calendar_container, 0, 0);
+    lv_obj_set_style_pad_all(calendar_container, 0, 0);
+    lv_obj_clear_flag(calendar_container, LV_OBJ_FLAG_SCROLLABLE);
+
+    calendar_title_label = lv_label_create(calendar_container);
+    lv_obj_set_width(calendar_title_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(calendar_title_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(calendar_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(calendar_title_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(calendar_title_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(calendar_title_label, "CALENDAR");
+    lv_obj_set_pos(calendar_title_label, 0, 4);
+
+    calendar_month_label = lv_label_create(calendar_container);
+    lv_obj_set_width(calendar_month_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(calendar_month_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(calendar_month_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(calendar_month_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(calendar_month_label, &lv_font_montserrat_18, 0);
+    lv_label_set_text(calendar_month_label, "2025/01");
+    lv_obj_set_pos(calendar_month_label, 0, 18);
+
+    for (int c = 0; c < 7; c++)
+    {
+        calendar_weekday_labels[c] = lv_label_create(calendar_container);
+        lv_obj_set_size(calendar_weekday_labels[c], cell_w, cell_h);
+        lv_obj_set_pos(calendar_weekday_labels[c], start_x + c * cell_w, head_y);
+        lv_obj_set_style_text_align(calendar_weekday_labels[c], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(calendar_weekday_labels[c], lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_font(calendar_weekday_labels[c], &lv_font_montserrat_10, 0);
+        lv_label_set_text(calendar_weekday_labels[c], week_names[c]);
+    }
+
+    for (int r = 0; r < 6; r++)
+    {
+        for (int c = 0; c < 7; c++)
+        {
+            calendar_day_labels[r][c] = lv_label_create(calendar_container);
+            lv_obj_set_size(calendar_day_labels[r][c], cell_w, cell_h);
+            lv_obj_set_pos(calendar_day_labels[r][c], start_x + c * cell_w, day_start_y + r * row_step);
+            lv_obj_set_style_text_align(calendar_day_labels[r][c], LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_style_text_color(calendar_day_labels[r][c], lv_color_hex(0xFFFFFF), 0);
+            lv_obj_set_style_text_font(calendar_day_labels[r][c], &lv_font_montserrat_10, 0);
+            lv_obj_set_style_bg_opa(calendar_day_labels[r][c], LV_OPA_TRANSP, 0);
+            lv_label_set_text(calendar_day_labels[r][c], "");
+        }
+    }
+
+    calendar_footer_label = lv_label_create(calendar_container);
+    lv_obj_set_width(calendar_footer_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(calendar_footer_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(calendar_footer_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(calendar_footer_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(calendar_footer_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(calendar_footer_label, "UP/DN month\nCENTER=today");
+    lv_obj_set_pos(calendar_footer_label, 0, 112);
 }
 
 static void create_portal_ui(lv_obj_t *scr)
@@ -1994,7 +2676,6 @@ static void create_portal_ui(lv_obj_t *scr)
     lv_obj_set_style_pad_all(portal_container, 0, 0);
     lv_obj_clear_flag(portal_container, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* 標題 */
     portal_title_label = lv_label_create(portal_container);
     lv_obj_set_width(portal_title_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(portal_title_label, LV_LABEL_LONG_CLIP);
@@ -2004,7 +2685,6 @@ static void create_portal_ui(lv_obj_t *scr)
     lv_label_set_text(portal_title_label, "WIFI SETUP");
     lv_obj_set_pos(portal_title_label, 0, 6);
 
-    /* AP */
     portal_line1_label = lv_label_create(portal_container);
     lv_obj_set_width(portal_line1_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(portal_line1_label, LV_LABEL_LONG_CLIP);
@@ -2014,7 +2694,6 @@ static void create_portal_ui(lv_obj_t *scr)
     lv_label_set_text(portal_line1_label, "AP: ClockSetup");
     lv_obj_set_pos(portal_line1_label, 0, 30);
 
-    /* IP */
     portal_line2_label = lv_label_create(portal_container);
     lv_obj_set_width(portal_line2_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(portal_line2_label, LV_LABEL_LONG_CLIP);
@@ -2024,7 +2703,6 @@ static void create_portal_ui(lv_obj_t *scr)
     lv_label_set_text(portal_line2_label, "IP: 192.168.4.1");
     lv_obj_set_pos(portal_line2_label, 0, 46);
 
-    /* 狀態第 1 行 */
     portal_line3_label = lv_label_create(portal_container);
     lv_obj_set_width(portal_line3_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(portal_line3_label, LV_LABEL_LONG_CLIP);
@@ -2034,7 +2712,6 @@ static void create_portal_ui(lv_obj_t *scr)
     lv_label_set_text(portal_line3_label, "Connect by phone");
     lv_obj_set_pos(portal_line3_label, 0, 70);
 
-    /* 狀態第 2 行 */
     portal_line4_label = lv_label_create(portal_container);
     lv_obj_set_width(portal_line4_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(portal_line4_label, LV_LABEL_LONG_CLIP);
@@ -2044,7 +2721,6 @@ static void create_portal_ui(lv_obj_t *scr)
     lv_label_set_text(portal_line4_label, "Open http://192.168.4.1");
     lv_obj_set_pos(portal_line4_label, 0, 86);
 
-    /* 底部 footer */
     portal_footer_label = lv_label_create(portal_container);
     lv_obj_set_width(portal_footer_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(portal_footer_label, LV_LABEL_LONG_CLIP);
@@ -2053,6 +2729,91 @@ static void create_portal_ui(lv_obj_t *scr)
     lv_obj_set_style_text_font(portal_footer_label, &lv_font_montserrat_10, 0);
     lv_label_set_text(portal_footer_label, "Waiting for setup");
     lv_obj_set_pos(portal_footer_label, 0, 110);
+}
+
+static void update_alarm_overlay_locked(void)
+{
+    if (alarm_overlay == NULL)
+    {
+        return;
+    }
+
+    if (!g_alarm_setting_mode)
+    {
+        lv_obj_add_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    bool blink_on = ((esp_timer_get_time() / SETTING_BLINK_PERIOD_US) % 2) == 0;
+
+    bool show_enable = true;
+    bool show_repeat = true;
+    bool show_hour = true;
+    bool show_minute = true;
+
+    if (!blink_on)
+    {
+        switch (g_alarm_set_field)
+        {
+        case ALARM_FIELD_ENABLE:
+            show_enable = false;
+            break;
+        case ALARM_FIELD_REPEAT:
+            show_repeat = false;
+            break;
+        case ALARM_FIELD_HOUR:
+            show_hour = false;
+            break;
+        case ALARM_FIELD_MINUTE:
+            show_minute = false;
+            break;
+        }
+    }
+
+    if (alarm_title_label != NULL)
+    {
+        lv_label_set_text(alarm_title_label, "ALARM SET");
+    }
+
+    if (alarm_hour_label != NULL)
+    {
+        if (show_hour)
+            lv_label_set_text_fmt(alarm_hour_label, "%02d", g_alarm_edit.hour);
+        else
+            lv_label_set_text(alarm_hour_label, "  ");
+    }
+
+    if (alarm_colon_label != NULL)
+    {
+        lv_label_set_text(alarm_colon_label, ":");
+    }
+
+    if (alarm_minute_label != NULL)
+    {
+        if (show_minute)
+            lv_label_set_text_fmt(alarm_minute_label, "%02d", g_alarm_edit.minute);
+        else
+            lv_label_set_text(alarm_minute_label, "  ");
+    }
+
+    if (alarm_enable_label != NULL)
+    {
+        if (show_enable)
+            lv_label_set_text(alarm_enable_label, g_alarm_edit.enabled ? "ON" : "OFF");
+        else
+            lv_label_set_text(alarm_enable_label, "   ");
+    }
+
+    if (alarm_repeat_label != NULL)
+    {
+        if (show_repeat)
+            lv_label_set_text(alarm_repeat_label, alarm_repeat_text(g_alarm_edit.repeat));
+        else
+            lv_label_set_text(alarm_repeat_label, "     ");
+    }
+
+    lv_obj_clear_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(alarm_overlay);
 }
 
 /* =========================
@@ -2088,6 +2849,8 @@ static void update_ui(void)
         {
             update_portal_ui();
             update_alarm_overlay_locked();
+            update_menu_overlay_locked();
+            update_confirm_overlay_locked();
             xSemaphoreGive(lvgl_mutex);
             return;
         }
@@ -2111,7 +2874,10 @@ static void update_ui(void)
         }
 
         set_weather_text();
+        update_calendar_ui_locked(valid_time);
         update_alarm_overlay_locked();
+        update_menu_overlay_locked();
+        update_confirm_overlay_locked();
 
         xSemaphoreGive(lvgl_mutex);
     }
@@ -2225,6 +2991,66 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
         return;
     }
 
+    if (g_confirm_open)
+    {
+        if (event_type == BUTTON_SHORT_PRESS || event_type == BUTTON_REPEAT_PRESS)
+        {
+            switch (button_id)
+            {
+            case BUTTON_UP:
+                g_confirm_yes_selected = false;
+                update_ui();
+                break;
+
+            case BUTTON_DOWN:
+                g_confirm_yes_selected = true;
+                update_ui();
+                break;
+
+            case BUTTON_CENTER:
+                if (event_type == BUTTON_SHORT_PRESS)
+                {
+                    confirm_execute();
+                }
+                break;
+            }
+        }
+        else if (event_type == BUTTON_LONG_PRESS && button_id == BUTTON_CENTER)
+        {
+            confirm_close();
+        }
+        return;
+    }
+
+    if (g_menu_open)
+    {
+        if (event_type == BUTTON_SHORT_PRESS || event_type == BUTTON_REPEAT_PRESS)
+        {
+            switch (button_id)
+            {
+            case BUTTON_UP:
+                menu_move(-1);
+                break;
+
+            case BUTTON_DOWN:
+                menu_move(+1);
+                break;
+
+            case BUTTON_CENTER:
+                if (event_type == BUTTON_SHORT_PRESS)
+                {
+                    menu_execute_selected();
+                }
+                break;
+            }
+        }
+        else if (event_type == BUTTON_LONG_PRESS && button_id == BUTTON_CENTER)
+        {
+            menu_close();
+        }
+        return;
+    }
+
     if (event_type == BUTTON_SHORT_PRESS || event_type == BUTTON_REPEAT_PRESS)
     {
         if (g_alarm_setting_mode)
@@ -2271,22 +3097,59 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
             return;
         }
 
+        if (current_panel == PANEL_CALENDAR)
+        {
+            switch (button_id)
+            {
+            case BUTTON_UP:
+                calendar_change_month(-1);
+                update_ui();
+                break;
+
+            case BUTTON_DOWN:
+                calendar_change_month(+1);
+                update_ui();
+                break;
+
+            case BUTTON_CENTER:
+                if (event_type == BUTTON_SHORT_PRESS)
+                {
+                    calendar_reset_to_current_month();
+                    ESP_LOGI(TAG, "月曆回到本月");
+                    update_ui();
+                }
+                break;
+
+            case BUTTON_COMBO_UP_DOWN:
+                if (event_type == BUTTON_SHORT_PRESS)
+                {
+                    start_manual_resync();
+                }
+                break;
+            }
+            return;
+        }
+
         if (event_type == BUTTON_SHORT_PRESS)
         {
             switch (button_id)
             {
             case BUTTON_UP:
+                current_panel = PANEL_DIGITAL;
+                update_ui();
+                break;
+
             case BUTTON_DOWN:
-                current_panel = (current_panel == PANEL_DIGITAL) ? PANEL_ANALOG : PANEL_DIGITAL;
-                ESP_LOGI(TAG, "切換錶面: %s",
-                         (current_panel == PANEL_DIGITAL) ? "Digital" : "Analog");
+                current_panel = PANEL_ANALOG;
+                update_ui();
+                break;
+
+            case BUTTON_CENTER:
+                menu_open();
                 break;
 
             case BUTTON_COMBO_UP_DOWN:
                 start_manual_resync();
-                break;
-
-            case BUTTON_CENTER:
                 break;
             }
         }
@@ -2301,18 +3164,26 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
             }
             else if (!is_setting_time)
             {
-                if (current_panel == PANEL_DIGITAL)
+                if (current_panel == PANEL_CALENDAR)
+                {
+                    current_panel = g_last_clock_panel_before_calendar;
+                    update_ui();
+                }
+                else if (current_panel == PANEL_DIGITAL)
                 {
                     enter_time_setting_mode();
+                    update_ui();
                 }
-                else
+                else if (current_panel == PANEL_ANALOG)
                 {
                     enter_alarm_setting_mode();
+                    update_ui();
                 }
             }
             else
             {
                 save_time_setting_and_exit();
+                update_ui();
             }
         }
     }
@@ -2434,9 +3305,12 @@ void app_main(void)
 
         create_digital_ui(scr);
         create_analog_ui(scr);
+        create_calendar_ui(scr);
         create_portal_ui(scr);
         create_boot_overlay(scr);
         create_alarm_overlay(scr);
+        create_menu_overlay(scr);
+        create_confirm_overlay(scr);
         update_panel_visibility();
 
         if (g_boot_hint != BOOT_HINT_NONE)
@@ -2466,6 +3340,7 @@ void app_main(void)
         g_wifi_failed = false;
     }
 
+    calendar_ensure_initialized();
     update_ui();
 
     ESP_LOGI(TAG, "進入主迴圈");
@@ -2521,19 +3396,81 @@ void app_main(void)
             enter_deep_sleep();
         }
 
+        if (g_request_clear_wifi)
+        {
+            g_request_clear_wifi = false;
+
+            ESP_LOGI(TAG, "由 Menu 清除 Wi-Fi 設定");
+
+            if (wifi_portal_is_running())
+            {
+                wifi_portal_stop();
+            }
+
+            wifi_disconnect();
+
+            if (!wifi_config_clear_credentials())
+            {
+                ESP_LOGW(TAG, "由 Menu 清除 Wi-Fi 設定失敗");
+            }
+
+            memset(g_wifi_ssid, 0, sizeof(g_wifi_ssid));
+            memset(g_wifi_password, 0, sizeof(g_wifi_password));
+            g_wifi_credentials_loaded = false;
+
+            g_menu_open = false;
+            g_confirm_open = false;
+            g_confirm_action = CONFIRM_NONE;
+            g_confirm_yes_selected = false;
+
+            g_app_mode = APP_MODE_WIFI_PORTAL;
+            current_panel = PANEL_DIGITAL;
+            g_wifi_failed = false;
+            g_time_syncing = false;
+            g_force_unknown_during_sync = false;
+
+            if (!wifi_portal_start(NULL, NULL))
+            {
+                ESP_LOGE(TAG, "清除 Wi-Fi 後啟動 portal 失敗");
+            }
+
+            update_ui();
+        }
+
+        if (g_request_open_wifi_setup)
+        {
+            g_request_open_wifi_setup = false;
+
+            if (g_app_mode != APP_MODE_WIFI_PORTAL)
+            {
+                ESP_LOGI(TAG, "由 Menu 進入 Wi-Fi Setup");
+
+                clock_panel_t restore_panel = current_panel;
+                wifi_disconnect();
+
+                g_app_mode = APP_MODE_WIFI_PORTAL;
+
+                if (!wifi_portal_is_running())
+                {
+                    if (!wifi_portal_start(NULL, NULL))
+                    {
+                        ESP_LOGE(TAG, "由 Menu 啟動 Wi-Fi portal 失敗");
+                        g_app_mode = APP_MODE_CLOCK;
+                        current_panel = restore_panel;
+                    }
+                }
+
+                update_ui();
+            }
+        }
+
         if (g_app_mode == APP_MODE_WIFI_PORTAL && wifi_portal_has_new_credentials())
         {
             ESP_LOGI(TAG, "偵測到新的 Wi-Fi credentials，準備切回 STA 模式");
 
-            /* 先顯示：
-             * Saved: <SSID>
-             * Reconnecting...
-             * Please wait...
-             */
             update_ui();
             vTaskDelay(pdMS_TO_TICKS(PORTAL_SAVED_STATUS_MS));
 
-            /* 顯示完成後再清旗標並切換模式 */
             wifi_portal_clear_new_credentials_flag();
 
             wifi_portal_stop();
