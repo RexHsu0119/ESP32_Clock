@@ -142,12 +142,12 @@ static lv_obj_t *boot_overlay_title = NULL;
 static lv_obj_t *boot_overlay_line1 = NULL;
 static lv_obj_t *boot_overlay_line2 = NULL;
 static lv_obj_t *boot_overlay_line3 = NULL;
+static lv_obj_t *boot_overlay_line4 = NULL;
 
 /* 鬧鐘設定 overlay */
 static lv_obj_t *alarm_overlay = NULL;
 static lv_obj_t *alarm_title_label = NULL;
 static lv_obj_t *alarm_help_label = NULL;
-/* 鬧鐘設定固定欄位 */
 static lv_obj_t *alarm_hour_label = NULL;
 static lv_obj_t *alarm_colon_label = NULL;
 static lv_obj_t *alarm_minute_label = NULL;
@@ -174,9 +174,8 @@ static lv_obj_t *analog_status_label = NULL;
 static lv_obj_t *analog_date_label = NULL;
 static lv_obj_t *analog_weekday_label = NULL;
 
-/* 類比錶面：右側資訊 */
-static lv_obj_t *analog_temp_label = NULL;
-static lv_obj_t *analog_humidity_label = NULL;
+/* 類比錶面：底部單一資訊列 */
+static lv_obj_t *analog_weather_label = NULL;
 
 /* 配網畫面 */
 static lv_obj_t *portal_title_label = NULL;
@@ -184,6 +183,7 @@ static lv_obj_t *portal_line1_label = NULL;
 static lv_obj_t *portal_line2_label = NULL;
 static lv_obj_t *portal_line3_label = NULL;
 static lv_obj_t *portal_line4_label = NULL;
+static lv_obj_t *portal_footer_label = NULL;
 
 static lv_obj_t *analog_face = NULL;
 static lv_obj_t *hour_hand = NULL;
@@ -209,19 +209,13 @@ static volatile bool g_wifi_failed = false;
 static i2s_chan_handle_t s_audio_tx_chan = NULL;
 static bool s_audio_inited = false;
 
-/* forward declarations */
-static void lvgl_task(void *arg);
-static void network_time_task(void *arg);
-static void update_ui(void);
-static void enter_deep_sleep(void);
-
-/* 類比時鐘尺寸 */
-#define ANALOG_FACE_SIZE 64
+/* 類比時鐘尺寸：放大版 */
+#define ANALOG_FACE_SIZE 76
 #define ANALOG_CENTER_X (ANALOG_FACE_SIZE / 2)
 #define ANALOG_CENTER_Y (ANALOG_FACE_SIZE / 2)
-#define HOUR_HAND_LEN 16
-#define MINUTE_HAND_LEN 22
-#define SECOND_HAND_LEN 26
+#define HOUR_HAND_LEN 19
+#define MINUTE_HAND_LEN 28
+#define SECOND_HAND_LEN 32
 
 /* LVGL UI 更新週期 */
 #define UI_UPDATE_PERIOD_NORMAL_MS 1000
@@ -233,13 +227,9 @@ static void enter_deep_sleep(void);
 #define DIGIT_FIELD_WIDTH 40
 #define COLON_FIELD_WIDTH 10
 
-/* 類比錶面方案 A：左邊時鐘，右邊溫濕度 */
-#define ANALOG_FACE_X 6
-#define ANALOG_FACE_Y 16
-#define ANALOG_INFO_X 86
-#define ANALOG_INFO_TEMP_Y 30
-#define ANALOG_INFO_HUMI_Y 52
-#define ANALOG_INFO_WIDTH 68
+/* 類比錶面：置中錶盤 */
+#define ANALOG_FACE_X ((DISPLAY_WIDTH - ANALOG_FACE_SIZE) / 2)
+#define ANALOG_FACE_Y 22
 
 /* 開機按住 UP 強制進 ClockSetup */
 /* 開機按住 DOWN 清除 Wi-Fi 設定並進 ClockSetup */
@@ -247,8 +237,11 @@ static void enter_deep_sleep(void);
 #define PORTAL_FORCE_SAMPLE_MS 20
 
 /* 開機提示畫面顯示時間 */
-#define BOOT_HINT_FORCE_SETUP_MS 1000
-#define BOOT_HINT_CLEAR_WIFI_MS 1200
+#define BOOT_HINT_FORCE_SETUP_MS 2500
+#define BOOT_HINT_CLEAR_WIFI_MS 2500
+
+/* Wi-Fi portal 成功儲存後，保留提示畫面的顯示時間 */
+#define PORTAL_SAVED_STATUS_MS 1500
 
 /* MAX98357 pins on S3 智能擴展板 V1.7 */
 #define AUDIO_I2S_BCLK_GPIO GPIO_NUM_15
@@ -265,6 +258,11 @@ static void enter_deep_sleep(void);
 #define ALARM_KEY_HOUR "hour"
 #define ALARM_KEY_MINUTE "minute"
 #define ALARM_KEY_REPEAT "repeat"
+
+/* forward declarations */
+static void update_ui(void);
+static void network_time_task(void *arg);
+static void update_alarm_overlay_locked(void);
 
 static void lvgl_tick_cb(void *arg)
 {
@@ -752,254 +750,6 @@ static void alarm_update_flash_effect(void)
     }
 }
 
-static void create_alarm_overlay(lv_obj_t *scr)
-{
-    alarm_overlay = lv_obj_create(scr);
-    lv_obj_set_size(alarm_overlay, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    lv_obj_center(alarm_overlay);
-    lv_obj_set_style_bg_color(alarm_overlay, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(alarm_overlay, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(alarm_overlay, 0, 0);
-    lv_obj_set_style_pad_all(alarm_overlay, 0, 0);
-    lv_obj_clear_flag(alarm_overlay, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
-
-    alarm_title_label = lv_label_create(alarm_overlay);
-    lv_obj_set_width(alarm_title_label, DISPLAY_WIDTH - 8);
-    lv_label_set_long_mode(alarm_title_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_align(alarm_title_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(alarm_title_label, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_text_font(alarm_title_label, &lv_font_montserrat_14, 0);
-    lv_label_set_text(alarm_title_label, "ALARM SET");
-    lv_obj_set_pos(alarm_title_label, 4, 4);
-
-    /* 時間固定欄位：HH : MM */
-    alarm_hour_label = lv_label_create(alarm_overlay);
-    lv_obj_set_width(alarm_hour_label, 34);
-    lv_obj_set_style_text_align(alarm_hour_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(alarm_hour_label, lv_color_hex(0xFF0000), 0);
-    lv_obj_set_style_text_font(alarm_hour_label, &lv_font_montserrat_24, 0);
-    lv_label_set_text(alarm_hour_label, "07");
-    lv_obj_set_pos(alarm_hour_label, 36, 24);
-
-    alarm_colon_label = lv_label_create(alarm_overlay);
-    lv_obj_set_width(alarm_colon_label, 12);
-    lv_obj_set_style_text_align(alarm_colon_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(alarm_colon_label, lv_color_hex(0xFF0000), 0);
-    lv_obj_set_style_text_font(alarm_colon_label, &lv_font_montserrat_24, 0);
-    lv_label_set_text(alarm_colon_label, ":");
-    lv_obj_set_pos(alarm_colon_label, 74, 24);
-
-    alarm_minute_label = lv_label_create(alarm_overlay);
-    lv_obj_set_width(alarm_minute_label, 34);
-    lv_obj_set_style_text_align(alarm_minute_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(alarm_minute_label, lv_color_hex(0xFF0000), 0);
-    lv_obj_set_style_text_font(alarm_minute_label, &lv_font_montserrat_24, 0);
-    lv_label_set_text(alarm_minute_label, "00");
-    lv_obj_set_pos(alarm_minute_label, 88, 24);
-
-    /* 狀態固定欄位：ON/OFF + ONCE/DAILY */
-    alarm_enable_label = lv_label_create(alarm_overlay);
-    lv_obj_set_width(alarm_enable_label, 40);
-    lv_obj_set_style_text_align(alarm_enable_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(alarm_enable_label, lv_color_hex(0x00FFCC), 0);
-    lv_obj_set_style_text_font(alarm_enable_label, &lv_font_montserrat_14, 0);
-    lv_label_set_text(alarm_enable_label, "ON");
-    lv_obj_set_pos(alarm_enable_label, 24, 56);
-
-    alarm_repeat_label = lv_label_create(alarm_overlay);
-    lv_obj_set_width(alarm_repeat_label, 64);
-    lv_obj_set_style_text_align(alarm_repeat_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(alarm_repeat_label, lv_color_hex(0x00FFCC), 0);
-    lv_obj_set_style_text_font(alarm_repeat_label, &lv_font_montserrat_14, 0);
-    lv_label_set_text(alarm_repeat_label, "DAILY");
-    lv_obj_set_pos(alarm_repeat_label, 72, 56);
-
-    alarm_help_label = lv_label_create(alarm_overlay);
-    lv_obj_set_width(alarm_help_label, DISPLAY_WIDTH - 8);
-    lv_label_set_long_mode(alarm_help_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_align(alarm_help_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(alarm_help_label, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_set_style_text_font(alarm_help_label, &lv_font_montserrat_10, 0);
-    lv_label_set_text(alarm_help_label, "UP/DOWN adj  CENTER next/save");
-    lv_obj_set_pos(alarm_help_label, 4, 70);
-}
-
-static void update_alarm_overlay_locked(void)
-{
-    if (alarm_overlay == NULL)
-    {
-        return;
-    }
-
-    if (!g_alarm_setting_mode)
-    {
-        lv_obj_add_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
-        return;
-    }
-
-    bool blink_on = ((esp_timer_get_time() / SETTING_BLINK_PERIOD_US) % 2) == 0;
-
-    bool show_enable = true;
-    bool show_repeat = true;
-    bool show_hour = true;
-    bool show_minute = true;
-
-    if (!blink_on)
-    {
-        switch (g_alarm_set_field)
-        {
-        case ALARM_FIELD_ENABLE:
-            show_enable = false;
-            break;
-        case ALARM_FIELD_REPEAT:
-            show_repeat = false;
-            break;
-        case ALARM_FIELD_HOUR:
-            show_hour = false;
-            break;
-        case ALARM_FIELD_MINUTE:
-            show_minute = false;
-            break;
-        }
-    }
-
-    lv_label_set_text(alarm_title_label, "ALARM SET");
-
-    if (show_hour)
-    {
-        lv_label_set_text_fmt(alarm_hour_label, "%02d", g_alarm_edit.hour);
-    }
-    else
-    {
-        lv_label_set_text(alarm_hour_label, "  ");
-    }
-
-    lv_label_set_text(alarm_colon_label, ":");
-
-    if (show_minute)
-    {
-        lv_label_set_text_fmt(alarm_minute_label, "%02d", g_alarm_edit.minute);
-    }
-    else
-    {
-        lv_label_set_text(alarm_minute_label, "  ");
-    }
-
-    if (show_enable)
-    {
-        lv_label_set_text(alarm_enable_label, g_alarm_edit.enabled ? "ON" : "OFF");
-    }
-    else
-    {
-        lv_label_set_text(alarm_enable_label, "   ");
-    }
-
-    if (show_repeat)
-    {
-        lv_label_set_text(alarm_repeat_label, alarm_repeat_text(g_alarm_edit.repeat));
-    }
-    else
-    {
-        lv_label_set_text(alarm_repeat_label, "     ");
-    }
-
-    lv_obj_clear_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(alarm_overlay);
-}
-
-static void enter_alarm_setting_mode(void)
-{
-    g_alarm_edit = g_alarm;
-    g_alarm_setting_mode = true;
-    g_alarm_set_field = ALARM_FIELD_ENABLE;
-    current_panel = PANEL_ANALOG;
-
-    ESP_LOGI(TAG, "進入鬧鐘設定模式");
-
-    if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
-    {
-        update_alarm_overlay_locked();
-        xSemaphoreGive(lvgl_mutex);
-    }
-
-    update_ui();
-}
-
-static void save_alarm_setting_and_exit(void)
-{
-    g_alarm = g_alarm_edit;
-    g_alarm_setting_mode = false;
-    alarm_save_to_nvs();
-
-    if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
-    {
-        update_alarm_overlay_locked();
-        xSemaphoreGive(lvgl_mutex);
-    }
-
-    ESP_LOGI(TAG, "鬧鐘設定已保存");
-    update_ui();
-}
-
-static void adjust_alarm_field(int delta)
-{
-    switch (g_alarm_set_field)
-    {
-    case ALARM_FIELD_ENABLE:
-        g_alarm_edit.enabled = !g_alarm_edit.enabled;
-        ESP_LOGI(TAG, "鬧鐘啟用: %s", g_alarm_edit.enabled ? "ON" : "OFF");
-        break;
-
-    case ALARM_FIELD_REPEAT:
-        g_alarm_edit.repeat = (g_alarm_edit.repeat == ALARM_REPEAT_ONCE) ? ALARM_REPEAT_DAILY : ALARM_REPEAT_ONCE;
-        ESP_LOGI(TAG, "鬧鐘週期: %s", alarm_repeat_text(g_alarm_edit.repeat));
-        break;
-
-    case ALARM_FIELD_HOUR:
-        g_alarm_edit.hour = (g_alarm_edit.hour + delta + 24) % 24;
-        ESP_LOGI(TAG, "鬧鐘小時: %d", g_alarm_edit.hour);
-        break;
-
-    case ALARM_FIELD_MINUTE:
-        g_alarm_edit.minute = (g_alarm_edit.minute + delta + 60) % 60;
-        ESP_LOGI(TAG, "鬧鐘分鐘: %d", g_alarm_edit.minute);
-        break;
-    }
-
-    if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
-    {
-        update_alarm_overlay_locked();
-        xSemaphoreGive(lvgl_mutex);
-    }
-}
-
-static void advance_alarm_field(void)
-{
-    switch (g_alarm_set_field)
-    {
-    case ALARM_FIELD_ENABLE:
-        g_alarm_set_field = ALARM_FIELD_REPEAT;
-        break;
-    case ALARM_FIELD_REPEAT:
-        g_alarm_set_field = ALARM_FIELD_HOUR;
-        break;
-    case ALARM_FIELD_HOUR:
-        g_alarm_set_field = ALARM_FIELD_MINUTE;
-        break;
-    case ALARM_FIELD_MINUTE:
-    default:
-        g_alarm_set_field = ALARM_FIELD_ENABLE;
-        break;
-    }
-
-    if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
-    {
-        update_alarm_overlay_locked();
-        xSemaphoreGive(lvgl_mutex);
-    }
-}
-
 /* =========================
  * Time setting
  * ========================= */
@@ -1087,6 +837,85 @@ static void advance_setting_field(void)
         ESP_LOGI(TAG, "切換到小時設定");
         break;
     }
+}
+
+/* =========================
+ * Alarm setting
+ * ========================= */
+static void enter_alarm_setting_mode(void)
+{
+    g_alarm_edit = g_alarm;
+    g_alarm_setting_mode = true;
+    g_alarm_set_field = ALARM_FIELD_ENABLE;
+    current_panel = PANEL_ANALOG;
+
+    ESP_LOGI(TAG, "進入鬧鐘設定模式");
+
+    if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        lv_obj_move_foreground(alarm_overlay);
+        xSemaphoreGive(lvgl_mutex);
+    }
+
+    update_ui();
+}
+
+static void save_alarm_setting_and_exit(void)
+{
+    g_alarm = g_alarm_edit;
+    g_alarm_setting_mode = false;
+    alarm_save_to_nvs();
+    update_ui();
+}
+
+static void adjust_alarm_field(int delta)
+{
+    switch (g_alarm_set_field)
+    {
+    case ALARM_FIELD_ENABLE:
+        g_alarm_edit.enabled = !g_alarm_edit.enabled;
+        ESP_LOGI(TAG, "鬧鐘啟用: %s", g_alarm_edit.enabled ? "ON" : "OFF");
+        break;
+
+    case ALARM_FIELD_REPEAT:
+        g_alarm_edit.repeat = (g_alarm_edit.repeat == ALARM_REPEAT_ONCE) ? ALARM_REPEAT_DAILY : ALARM_REPEAT_ONCE;
+        ESP_LOGI(TAG, "鬧鐘週期: %s", alarm_repeat_text(g_alarm_edit.repeat));
+        break;
+
+    case ALARM_FIELD_HOUR:
+        g_alarm_edit.hour = (g_alarm_edit.hour + delta + 24) % 24;
+        ESP_LOGI(TAG, "鬧鐘小時: %d", g_alarm_edit.hour);
+        break;
+
+    case ALARM_FIELD_MINUTE:
+        g_alarm_edit.minute = (g_alarm_edit.minute + delta + 60) % 60;
+        ESP_LOGI(TAG, "鬧鐘分鐘: %d", g_alarm_edit.minute);
+        break;
+    }
+
+    update_ui();
+}
+
+static void advance_alarm_field(void)
+{
+    switch (g_alarm_set_field)
+    {
+    case ALARM_FIELD_ENABLE:
+        g_alarm_set_field = ALARM_FIELD_REPEAT;
+        break;
+    case ALARM_FIELD_REPEAT:
+        g_alarm_set_field = ALARM_FIELD_HOUR;
+        break;
+    case ALARM_FIELD_HOUR:
+        g_alarm_set_field = ALARM_FIELD_MINUTE;
+        break;
+    case ALARM_FIELD_MINUTE:
+    default:
+        g_alarm_set_field = ALARM_FIELD_ENABLE;
+        break;
+    }
+
+    update_ui();
 }
 
 /* =========================
@@ -1381,17 +1210,11 @@ static void set_top_info_unknown(lv_obj_t *status_obj,
 static void set_digital_time_unknown(void)
 {
     if (hour_label != NULL)
-    {
         lv_label_set_text(hour_label, "__");
-    }
     if (minute_label != NULL)
-    {
         lv_label_set_text(minute_label, "__");
-    }
     if (second_label != NULL)
-    {
         lv_label_set_text(second_label, "__");
-    }
 }
 
 static void set_analog_clock_visible(bool visible)
@@ -1459,23 +1282,46 @@ static void set_weather_text(void)
     weather_info_t info;
     char buf[40];
 
-    if (weather_label != NULL)
+    if (g_alarm_setting_mode)
     {
-        if (g_alarm_setting_mode)
+        if (weather_label != NULL)
         {
             lv_obj_set_style_text_color(weather_label, lv_color_hex(0xAAAAAA), 0);
             lv_label_set_text(weather_label, "Alarm Setting");
-            return;
         }
-        else if (is_setting_time)
+
+        if (analog_weather_label != NULL)
+        {
+            lv_obj_set_style_text_color(analog_weather_label, lv_color_hex(0xAAAAAA), 0);
+            lv_label_set_text(analog_weather_label, "Alarm Setting");
+        }
+        return;
+    }
+    else if (is_setting_time)
+    {
+        if (weather_label != NULL)
         {
             lv_obj_set_style_text_color(weather_label, lv_color_hex(0xAAAAAA), 0);
             lv_label_set_text(weather_label, get_setting_status_text());
-            return;
         }
-        else
+
+        if (analog_weather_label != NULL)
+        {
+            lv_obj_set_style_text_color(analog_weather_label, lv_color_hex(0xAAAAAA), 0);
+            lv_label_set_text(analog_weather_label, get_setting_status_text());
+        }
+        return;
+    }
+    else
+    {
+        if (weather_label != NULL)
         {
             lv_obj_set_style_text_color(weather_label, lv_color_hex(0x00FFCC), 0);
+        }
+
+        if (analog_weather_label != NULL)
+        {
+            lv_obj_set_style_text_color(analog_weather_label, lv_color_hex(0x00FFCC), 0);
         }
     }
 
@@ -1486,14 +1332,9 @@ static void set_weather_text(void)
             lv_label_set_text(weather_label, "__" DEGREE_UTF8 "C  __%RH");
         }
 
-        if (analog_temp_label != NULL)
+        if (analog_weather_label != NULL)
         {
-            lv_label_set_text(analog_temp_label, "__" DEGREE_UTF8 "C");
-        }
-
-        if (analog_humidity_label != NULL)
-        {
-            lv_label_set_text(analog_humidity_label, "__%RH");
+            lv_label_set_text(analog_weather_label, "__" DEGREE_UTF8 "C  __%RH");
         }
 
         return;
@@ -1501,24 +1342,18 @@ static void set_weather_text(void)
 
     if (weather_get_info(&info) && info.valid)
     {
+        snprintf(buf, sizeof(buf), "%.1f" DEGREE_UTF8 "C  %d%%RH",
+                 info.temperature_c,
+                 info.humidity_percent);
+
         if (weather_label != NULL)
         {
-            snprintf(buf, sizeof(buf), "%.1f" DEGREE_UTF8 "C  %d%%RH",
-                     info.temperature_c,
-                     info.humidity_percent);
             lv_label_set_text(weather_label, buf);
         }
 
-        if (analog_temp_label != NULL)
+        if (analog_weather_label != NULL)
         {
-            snprintf(buf, sizeof(buf), "%.1f" DEGREE_UTF8 "C", info.temperature_c);
-            lv_label_set_text(analog_temp_label, buf);
-        }
-
-        if (analog_humidity_label != NULL)
-        {
-            snprintf(buf, sizeof(buf), "%d%%RH", info.humidity_percent);
-            lv_label_set_text(analog_humidity_label, buf);
+            lv_label_set_text(analog_weather_label, buf);
         }
     }
     else
@@ -1528,14 +1363,9 @@ static void set_weather_text(void)
             lv_label_set_text(weather_label, "__" DEGREE_UTF8 "C  __%RH");
         }
 
-        if (analog_temp_label != NULL)
+        if (analog_weather_label != NULL)
         {
-            lv_label_set_text(analog_temp_label, "__" DEGREE_UTF8 "C");
-        }
-
-        if (analog_humidity_label != NULL)
-        {
-            lv_label_set_text(analog_humidity_label, "__%RH");
+            lv_label_set_text(analog_weather_label, "__" DEGREE_UTF8 "C  __%RH");
         }
     }
 }
@@ -1546,7 +1376,8 @@ static void update_portal_ui(void)
         portal_line1_label == NULL ||
         portal_line2_label == NULL ||
         portal_line3_label == NULL ||
-        portal_line4_label == NULL)
+        portal_line4_label == NULL ||
+        portal_footer_label == NULL)
     {
         return;
     }
@@ -1555,12 +1386,30 @@ static void update_portal_ui(void)
 
     if (!wifi_portal_is_running())
     {
-        lv_label_set_text(portal_line1_label, "Starting portal...");
+        lv_obj_set_style_text_color(portal_line1_label, lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_color(portal_line2_label, lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_color(portal_line3_label, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_color(portal_line4_label, lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_color(portal_footer_label, lv_color_hex(0xAAAAAA), 0);
+
+        lv_obj_set_style_text_font(portal_line1_label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(portal_line2_label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(portal_line3_label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(portal_line4_label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(portal_footer_label, &lv_font_montserrat_10, 0);
+
+        lv_label_set_text(portal_line1_label, "");
         lv_label_set_text(portal_line2_label, "");
-        lv_label_set_text(portal_line3_label, "");
+        lv_label_set_text(portal_line3_label, "Starting portal...");
         lv_label_set_text(portal_line4_label, "");
+        lv_label_set_text(portal_footer_label, "Please wait...");
         return;
     }
+
+    lv_obj_set_style_text_color(portal_line1_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_color(portal_line2_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(portal_line1_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(portal_line2_label, &lv_font_montserrat_12, 0);
 
     lv_label_set_text_fmt(portal_line1_label, "AP: %s", WIFI_PORTAL_DEFAULT_AP_SSID);
     lv_label_set_text_fmt(portal_line2_label, "IP: %s", wifi_portal_get_ap_ip());
@@ -1569,19 +1418,29 @@ static void update_portal_ui(void)
     {
         lv_obj_set_style_text_color(portal_line3_label, lv_color_hex(0x00FFCC), 0);
         lv_obj_set_style_text_color(portal_line4_label, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_color(portal_footer_label, lv_color_hex(0xAAAAAA), 0);
+
+        lv_obj_set_style_text_font(portal_line3_label, &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_font(portal_line4_label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(portal_footer_label, &lv_font_montserrat_10, 0);
 
         lv_label_set_text_fmt(portal_line3_label, "Saved: %s", wifi_portal_get_last_ssid());
         lv_label_set_text(portal_line4_label, "Reconnecting...");
+        lv_label_set_text(portal_footer_label, "Please wait...");
     }
     else
     {
         lv_obj_set_style_text_color(portal_line3_label, lv_color_hex(0xFFFFFF), 0);
         lv_obj_set_style_text_color(portal_line4_label, lv_color_hex(0xFF0000), 0);
-        lv_obj_set_style_text_font(portal_line4_label, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(portal_footer_label, lv_color_hex(0xAAAAAA), 0);
 
-        lv_label_set_text(portal_line3_label, "Open in phone");
-        lv_label_set_text_fmt(portal_line4_label, "http://%s", wifi_portal_get_ap_ip());
+        lv_obj_set_style_text_font(portal_line3_label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(portal_line4_label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(portal_footer_label, &lv_font_montserrat_10, 0);
+
+        lv_label_set_text(portal_line3_label, "Connect by phone");
+        lv_label_set_text_fmt(portal_line4_label, "Open http://%s", wifi_portal_get_ap_ip());
+        lv_label_set_text(portal_footer_label, "Waiting for setup");
     }
 }
 
@@ -1668,29 +1527,55 @@ static void create_boot_overlay(lv_obj_t *scr)
     lv_obj_clear_flag(boot_overlay, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(boot_overlay, LV_OBJ_FLAG_HIDDEN);
 
+    /* 標題 */
     boot_overlay_title = lv_label_create(boot_overlay);
+    lv_obj_set_width(boot_overlay_title, DISPLAY_WIDTH);
+    lv_label_set_long_mode(boot_overlay_title, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(boot_overlay_title, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(boot_overlay_title, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_font(boot_overlay_title, &lv_font_montserrat_18, 0);
     lv_label_set_text(boot_overlay_title, "FORCE SETUP");
-    lv_obj_align(boot_overlay_title, LV_ALIGN_TOP_MID, 0, 6);
+    lv_obj_set_pos(boot_overlay_title, 0, 8);
 
+    /* 狀態提示 */
     boot_overlay_line1 = lv_label_create(boot_overlay);
+    lv_obj_set_width(boot_overlay_line1, DISPLAY_WIDTH);
+    lv_label_set_long_mode(boot_overlay_line1, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(boot_overlay_line1, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(boot_overlay_line1, lv_color_hex(0x00FFCC), 0);
     lv_obj_set_style_text_font(boot_overlay_line1, &lv_font_montserrat_12, 0);
-    lv_label_set_text(boot_overlay_line1, "Entering ClockSetup");
-    lv_obj_align(boot_overlay_line1, LV_ALIGN_TOP_MID, 0, 30);
+    lv_label_set_text(boot_overlay_line1, "Entering setup mode");
+    lv_obj_set_pos(boot_overlay_line1, 0, 36);
 
+    /* AP */
     boot_overlay_line2 = lv_label_create(boot_overlay);
+    lv_obj_set_width(boot_overlay_line2, DISPLAY_WIDTH);
+    lv_label_set_long_mode(boot_overlay_line2, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(boot_overlay_line2, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(boot_overlay_line2, lv_color_hex(0xAAAAAA), 0);
     lv_obj_set_style_text_font(boot_overlay_line2, &lv_font_montserrat_12, 0);
     lv_label_set_text(boot_overlay_line2, "AP: ClockSetup");
-    lv_obj_align(boot_overlay_line2, LV_ALIGN_TOP_MID, 0, 46);
+    lv_obj_set_pos(boot_overlay_line2, 0, 60);
 
+    /* IP */
     boot_overlay_line3 = lv_label_create(boot_overlay);
-    lv_obj_set_style_text_color(boot_overlay_line3, lv_color_hex(0xFF0000), 0);
-    lv_obj_set_style_text_font(boot_overlay_line3, &lv_font_montserrat_10, 0);
-    lv_label_set_text(boot_overlay_line3, "192.168.4.1");
-    lv_obj_align(boot_overlay_line3, LV_ALIGN_TOP_MID, 0, 62);
+    lv_obj_set_width(boot_overlay_line3, DISPLAY_WIDTH);
+    lv_label_set_long_mode(boot_overlay_line3, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(boot_overlay_line3, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(boot_overlay_line3, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(boot_overlay_line3, &lv_font_montserrat_12, 0);
+    lv_label_set_text(boot_overlay_line3, "IP: 192.168.4.1");
+    lv_obj_set_pos(boot_overlay_line3, 0, 76);
+
+    /* 底部提示 */
+    boot_overlay_line4 = lv_label_create(boot_overlay);
+    lv_obj_set_width(boot_overlay_line4, DISPLAY_WIDTH);
+    lv_label_set_long_mode(boot_overlay_line4, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(boot_overlay_line4, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(boot_overlay_line4, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(boot_overlay_line4, &lv_font_montserrat_10, 0);
+    lv_label_set_text(boot_overlay_line4, "Open on phone");
+    lv_obj_set_pos(boot_overlay_line4, 0, 104);
 }
 
 static void show_boot_overlay(boot_hint_t hint)
@@ -1704,16 +1589,24 @@ static void show_boot_overlay(boot_hint_t hint)
     {
     case BOOT_HINT_FORCE_SETUP:
         lv_label_set_text(boot_overlay_title, "FORCE SETUP");
-        lv_label_set_text(boot_overlay_line1, "Entering ClockSetup");
+        lv_label_set_text(boot_overlay_line1, "Entering setup mode");
         lv_label_set_text(boot_overlay_line2, "AP: ClockSetup");
-        lv_label_set_text(boot_overlay_line3, "192.168.4.1");
+        lv_label_set_text(boot_overlay_line3, "IP: 192.168.4.1");
+        if (boot_overlay_line4 != NULL)
+        {
+            lv_label_set_text(boot_overlay_line4, "Open on phone");
+        }
         break;
 
     case BOOT_HINT_CLEAR_WIFI:
         lv_label_set_text(boot_overlay_title, "CLEAR WIFI");
         lv_label_set_text(boot_overlay_line1, "Credentials erased");
-        lv_label_set_text(boot_overlay_line2, "Entering setup...");
-        lv_label_set_text(boot_overlay_line3, "192.168.4.1");
+        lv_label_set_text(boot_overlay_line2, "AP: ClockSetup");
+        lv_label_set_text(boot_overlay_line3, "IP: 192.168.4.1");
+        if (boot_overlay_line4 != NULL)
+        {
+            lv_label_set_text(boot_overlay_line4, "Open on phone");
+        }
         break;
 
     case BOOT_HINT_NONE:
@@ -1732,6 +1625,161 @@ static void hide_boot_overlay(void)
     {
         lv_obj_add_flag(boot_overlay, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+static void create_alarm_overlay(lv_obj_t *scr)
+{
+    alarm_overlay = lv_obj_create(scr);
+    lv_obj_set_size(alarm_overlay, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_center(alarm_overlay);
+    lv_obj_set_style_bg_color(alarm_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(alarm_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(alarm_overlay, 0, 0);
+    lv_obj_set_style_pad_all(alarm_overlay, 0, 0);
+    lv_obj_clear_flag(alarm_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
+
+    /* 標題 */
+    alarm_title_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_title_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(alarm_title_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(alarm_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(alarm_title_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(alarm_title_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(alarm_title_label, "ALARM SET");
+    lv_obj_set_pos(alarm_title_label, 0, 6);
+
+    /* 中間大時間：HH:MM */
+    alarm_hour_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_hour_label, 36);
+    lv_obj_set_style_text_align(alarm_hour_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(alarm_hour_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(alarm_hour_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(alarm_hour_label, "07");
+    lv_obj_set_pos(alarm_hour_label, 34, 28);
+
+    alarm_colon_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_colon_label, 16);
+    lv_obj_set_style_text_align(alarm_colon_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(alarm_colon_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(alarm_colon_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(alarm_colon_label, ":");
+    lv_obj_set_pos(alarm_colon_label, 72, 28);
+
+    alarm_minute_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_minute_label, 36);
+    lv_obj_set_style_text_align(alarm_minute_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(alarm_minute_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(alarm_minute_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(alarm_minute_label, "00");
+    lv_obj_set_pos(alarm_minute_label, 90, 28);
+
+    /* 固定前綴：Enable: */
+    lv_obj_t *alarm_enable_prefix = lv_label_create(alarm_overlay);
+    lv_obj_set_style_text_color(alarm_enable_prefix, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(alarm_enable_prefix, &lv_font_montserrat_14, 0);
+    lv_label_set_text(alarm_enable_prefix, "Enable:");
+    lv_obj_set_pos(alarm_enable_prefix, 28, 64);
+
+    alarm_enable_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_enable_label, 48);
+    lv_obj_set_style_text_align(alarm_enable_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(alarm_enable_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(alarm_enable_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(alarm_enable_label, "ON");
+    lv_obj_set_pos(alarm_enable_label, 92, 64);
+
+    /* 固定前綴：Repeat: */
+    lv_obj_t *alarm_repeat_prefix = lv_label_create(alarm_overlay);
+    lv_obj_set_style_text_color(alarm_repeat_prefix, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(alarm_repeat_prefix, &lv_font_montserrat_14, 0);
+    lv_label_set_text(alarm_repeat_prefix, "Repeat:");
+    lv_obj_set_pos(alarm_repeat_prefix, 28, 82);
+
+    alarm_repeat_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_repeat_label, 56);
+    lv_obj_set_style_text_align(alarm_repeat_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(alarm_repeat_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(alarm_repeat_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(alarm_repeat_label, "DAILY");
+    lv_obj_set_pos(alarm_repeat_label, 92, 82);
+
+    /* 底部兩列提示 */
+    alarm_help_label = lv_label_create(alarm_overlay);
+    lv_obj_set_width(alarm_help_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(alarm_help_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(alarm_help_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(alarm_help_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(alarm_help_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(alarm_help_label, "UP/DOWN adj\nCENTER next/save");
+    lv_obj_set_pos(alarm_help_label, 0, 104);
+}
+
+static void update_alarm_overlay_locked(void)
+{
+    if (alarm_overlay == NULL)
+    {
+        return;
+    }
+
+    if (!g_alarm_setting_mode)
+    {
+        lv_obj_add_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    bool blink_on = ((esp_timer_get_time() / SETTING_BLINK_PERIOD_US) % 2) == 0;
+
+    bool show_enable = true;
+    bool show_repeat = true;
+    bool show_hour = true;
+    bool show_minute = true;
+
+    if (!blink_on)
+    {
+        switch (g_alarm_set_field)
+        {
+        case ALARM_FIELD_ENABLE:
+            show_enable = false;
+            break;
+        case ALARM_FIELD_REPEAT:
+            show_repeat = false;
+            break;
+        case ALARM_FIELD_HOUR:
+            show_hour = false;
+            break;
+        case ALARM_FIELD_MINUTE:
+            show_minute = false;
+            break;
+        }
+    }
+
+    lv_label_set_text(alarm_title_label, "ALARM SET");
+
+    if (show_hour)
+        lv_label_set_text_fmt(alarm_hour_label, "%02d", g_alarm_edit.hour);
+    else
+        lv_label_set_text(alarm_hour_label, "  ");
+
+    lv_label_set_text(alarm_colon_label, ":");
+
+    if (show_minute)
+        lv_label_set_text_fmt(alarm_minute_label, "%02d", g_alarm_edit.minute);
+    else
+        lv_label_set_text(alarm_minute_label, "  ");
+
+    if (show_enable)
+        lv_label_set_text(alarm_enable_label, g_alarm_edit.enabled ? "ON" : "OFF");
+    else
+        lv_label_set_text(alarm_enable_label, "   ");
+
+    if (show_repeat)
+        lv_label_set_text(alarm_repeat_label, alarm_repeat_text(g_alarm_edit.repeat));
+    else
+        lv_label_set_text(alarm_repeat_label, "     ");
+
+    lv_obj_clear_flag(alarm_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(alarm_overlay);
 }
 
 static void create_digital_ui(lv_obj_t *scr)
@@ -1834,6 +1882,9 @@ static void create_digital_ui(lv_obj_t *scr)
     lv_label_set_text(second_label, "00");
 
     weather_label = lv_label_create(digital_container);
+    lv_obj_set_width(weather_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(weather_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(weather_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(weather_label, lv_color_hex(0x00FFCC), 0);
     lv_obj_set_style_text_font(weather_label, &lv_font_montserrat_14, 0);
     lv_label_set_text(weather_label, "__" DEGREE_UTF8 "C  __%RH");
@@ -1916,29 +1967,21 @@ static void create_analog_ui(lv_obj_t *scr)
     lv_obj_set_style_line_rounded(second_hand, true, 0);
 
     center_dot = lv_obj_create(analog_face);
-    lv_obj_set_size(center_dot, 6, 6);
+    lv_obj_set_size(center_dot, 7, 7);
     lv_obj_set_style_radius(center_dot, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(center_dot, lv_color_white(), 0);
     lv_obj_set_style_border_width(center_dot, 0, 0);
     lv_obj_center(center_dot);
 
-    analog_temp_label = lv_label_create(analog_container);
-    lv_obj_set_width(analog_temp_label, ANALOG_INFO_WIDTH);
-    lv_label_set_long_mode(analog_temp_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_align(analog_temp_label, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_set_style_text_color(analog_temp_label, lv_color_hex(0x00FFCC), 0);
-    lv_obj_set_style_text_font(analog_temp_label, &lv_font_montserrat_14, 0);
-    lv_label_set_text(analog_temp_label, "__" DEGREE_UTF8 "C");
-    lv_obj_set_pos(analog_temp_label, ANALOG_INFO_X, ANALOG_INFO_TEMP_Y);
-
-    analog_humidity_label = lv_label_create(analog_container);
-    lv_obj_set_width(analog_humidity_label, ANALOG_INFO_WIDTH);
-    lv_label_set_long_mode(analog_humidity_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_align(analog_humidity_label, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_set_style_text_color(analog_humidity_label, lv_color_hex(0x00FFCC), 0);
-    lv_obj_set_style_text_font(analog_humidity_label, &lv_font_montserrat_14, 0);
-    lv_label_set_text(analog_humidity_label, "__%RH");
-    lv_obj_set_pos(analog_humidity_label, ANALOG_INFO_X, ANALOG_INFO_HUMI_Y);
+    /* 和 digital 底部資訊使用同一個位置 */
+    analog_weather_label = lv_label_create(analog_container);
+    lv_obj_set_width(analog_weather_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(analog_weather_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(analog_weather_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(analog_weather_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(analog_weather_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(analog_weather_label, "__" DEGREE_UTF8 "C  __%RH");
+    lv_obj_align(analog_weather_label, LV_ALIGN_BOTTOM_MID, 0, -2);
 }
 
 static void create_portal_ui(lv_obj_t *scr)
@@ -1951,52 +1994,70 @@ static void create_portal_ui(lv_obj_t *scr)
     lv_obj_set_style_pad_all(portal_container, 0, 0);
     lv_obj_clear_flag(portal_container, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* 標題 */
     portal_title_label = lv_label_create(portal_container);
-    lv_obj_set_width(portal_title_label, DISPLAY_WIDTH - 8);
+    lv_obj_set_width(portal_title_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(portal_title_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(portal_title_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(portal_title_label, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_font(portal_title_label, &lv_font_montserrat_18, 0);
     lv_label_set_text(portal_title_label, "WIFI SETUP");
-    lv_obj_set_pos(portal_title_label, 4, 4);
+    lv_obj_set_pos(portal_title_label, 0, 6);
 
+    /* AP */
     portal_line1_label = lv_label_create(portal_container);
-    lv_obj_set_width(portal_line1_label, DISPLAY_WIDTH - 16);
+    lv_obj_set_width(portal_line1_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(portal_line1_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_align(portal_line1_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_align(portal_line1_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(portal_line1_label, lv_color_hex(0x00FFCC), 0);
     lv_obj_set_style_text_font(portal_line1_label, &lv_font_montserrat_12, 0);
     lv_label_set_text(portal_line1_label, "AP: ClockSetup");
-    lv_obj_set_pos(portal_line1_label, 8, 26);
+    lv_obj_set_pos(portal_line1_label, 0, 30);
 
+    /* IP */
     portal_line2_label = lv_label_create(portal_container);
-    lv_obj_set_width(portal_line2_label, DISPLAY_WIDTH - 16);
+    lv_obj_set_width(portal_line2_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(portal_line2_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_align(portal_line2_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_align(portal_line2_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(portal_line2_label, lv_color_hex(0xAAAAAA), 0);
     lv_obj_set_style_text_font(portal_line2_label, &lv_font_montserrat_12, 0);
     lv_label_set_text(portal_line2_label, "IP: 192.168.4.1");
-    lv_obj_set_pos(portal_line2_label, 8, 40);
+    lv_obj_set_pos(portal_line2_label, 0, 46);
 
+    /* 狀態第 1 行 */
     portal_line3_label = lv_label_create(portal_container);
-    lv_obj_set_width(portal_line3_label, DISPLAY_WIDTH - 16);
+    lv_obj_set_width(portal_line3_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(portal_line3_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_align(portal_line3_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_align(portal_line3_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(portal_line3_label, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_font(portal_line3_label, &lv_font_montserrat_12, 0);
-    lv_label_set_text(portal_line3_label, "Open in phone");
-    lv_obj_set_pos(portal_line3_label, 8, 56);
+    lv_label_set_text(portal_line3_label, "Connect by phone");
+    lv_obj_set_pos(portal_line3_label, 0, 70);
 
+    /* 狀態第 2 行 */
     portal_line4_label = lv_label_create(portal_container);
-    lv_obj_set_width(portal_line4_label, DISPLAY_WIDTH - 16);
+    lv_obj_set_width(portal_line4_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(portal_line4_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_align(portal_line4_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_align(portal_line4_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(portal_line4_label, lv_color_hex(0xFF0000), 0);
-    lv_obj_set_style_text_font(portal_line4_label, &lv_font_montserrat_10, 0);
-    lv_label_set_text(portal_line4_label, "http://192.168.4.1");
-    lv_obj_set_pos(portal_line4_label, 8, 70);
+    lv_obj_set_style_text_font(portal_line4_label, &lv_font_montserrat_12, 0);
+    lv_label_set_text(portal_line4_label, "Open http://192.168.4.1");
+    lv_obj_set_pos(portal_line4_label, 0, 86);
+
+    /* 底部 footer */
+    portal_footer_label = lv_label_create(portal_container);
+    lv_obj_set_width(portal_footer_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(portal_footer_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(portal_footer_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(portal_footer_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(portal_footer_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(portal_footer_label, "Waiting for setup");
+    lv_obj_set_pos(portal_footer_label, 0, 110);
 }
 
+/* =========================
+ * UI update/task
+ * ========================= */
 static void update_ui(void)
 {
     struct tm display_time;
@@ -2464,8 +2525,16 @@ void app_main(void)
         {
             ESP_LOGI(TAG, "偵測到新的 Wi-Fi credentials，準備切回 STA 模式");
 
-            wifi_portal_clear_new_credentials_flag();
+            /* 先顯示：
+             * Saved: <SSID>
+             * Reconnecting...
+             * Please wait...
+             */
             update_ui();
+            vTaskDelay(pdMS_TO_TICKS(PORTAL_SAVED_STATUS_MS));
+
+            /* 顯示完成後再清旗標並切換模式 */
+            wifi_portal_clear_new_credentials_flag();
 
             wifi_portal_stop();
             wifi_disconnect();
