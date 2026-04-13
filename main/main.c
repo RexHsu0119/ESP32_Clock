@@ -28,6 +28,8 @@
 #include "display.h"
 #include "button.h"
 #include "weather.h"
+#include "calendar_logic.h"
+#include "alarm_logic.h"
 #include "lvgl.h"
 
 static const char *TAG = "MAIN";
@@ -588,82 +590,6 @@ static bool start_network_sync_task(bool force_unknown_during_sync)
 /* =========================
  * Alarm
  * ========================= */
-static const char *alarm_repeat_text(alarm_repeat_t repeat)
-{
-    return (repeat == ALARM_REPEAT_DAILY) ? "DAILY" : "ONCE";
-}
-
-static bool alarm_save_to_nvs(void)
-{
-    nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open(ALARM_NAMESPACE, NVS_READWRITE, &nvs_handle);
-    if (err != ESP_OK)
-    {
-        ESP_LOGE(TAG, "打開 alarm NVS 失敗: %s", esp_err_to_name(err));
-        return false;
-    }
-
-    err = nvs_set_u8(nvs_handle, ALARM_KEY_ENABLED, g_alarm.enabled ? 1 : 0);
-    if (err == ESP_OK)
-        err = nvs_set_i32(nvs_handle, ALARM_KEY_HOUR, g_alarm.hour);
-    if (err == ESP_OK)
-        err = nvs_set_i32(nvs_handle, ALARM_KEY_MINUTE, g_alarm.minute);
-    if (err == ESP_OK)
-        err = nvs_set_i32(nvs_handle, ALARM_KEY_REPEAT, (int32_t)g_alarm.repeat);
-    if (err == ESP_OK)
-        err = nvs_commit(nvs_handle);
-
-    nvs_close(nvs_handle);
-
-    if (err != ESP_OK)
-    {
-        ESP_LOGE(TAG, "儲存 alarm NVS 失敗: %s", esp_err_to_name(err));
-        return false;
-    }
-
-    ESP_LOGI(TAG, "鬧鐘已儲存: enabled=%d time=%02d:%02d repeat=%s",
-             g_alarm.enabled, g_alarm.hour, g_alarm.minute, alarm_repeat_text(g_alarm.repeat));
-    return true;
-}
-
-static void alarm_load_from_nvs(void)
-{
-    nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open(ALARM_NAMESPACE, NVS_READONLY, &nvs_handle);
-    if (err != ESP_OK)
-    {
-        if (err != ESP_ERR_NVS_NOT_FOUND)
-        {
-            ESP_LOGE(TAG, "打開 alarm NVS 失敗: %s", esp_err_to_name(err));
-        }
-        return;
-    }
-
-    uint8_t enabled = 0;
-    int32_t hour = g_alarm.hour;
-    int32_t minute = g_alarm.minute;
-    int32_t repeat = (int32_t)g_alarm.repeat;
-
-    esp_err_t e1 = nvs_get_u8(nvs_handle, ALARM_KEY_ENABLED, &enabled);
-    esp_err_t e2 = nvs_get_i32(nvs_handle, ALARM_KEY_HOUR, &hour);
-    esp_err_t e3 = nvs_get_i32(nvs_handle, ALARM_KEY_MINUTE, &minute);
-    esp_err_t e4 = nvs_get_i32(nvs_handle, ALARM_KEY_REPEAT, &repeat);
-
-    nvs_close(nvs_handle);
-
-    if (e1 == ESP_OK)
-        g_alarm.enabled = (enabled == 1);
-    if (e2 == ESP_OK && hour >= 0 && hour <= 23)
-        g_alarm.hour = (int)hour;
-    if (e3 == ESP_OK && minute >= 0 && minute <= 59)
-        g_alarm.minute = (int)minute;
-    if (e4 == ESP_OK && (repeat == ALARM_REPEAT_ONCE || repeat == ALARM_REPEAT_DAILY))
-        g_alarm.repeat = (alarm_repeat_t)repeat;
-
-    ESP_LOGI(TAG, "載入鬧鐘: enabled=%d time=%02d:%02d repeat=%s",
-             g_alarm.enabled, g_alarm.hour, g_alarm.minute, alarm_repeat_text(g_alarm.repeat));
-}
-
 static void alarm_mark_triggered(const struct tm *t)
 {
     g_alarm_last_trigger_year = t->tm_year;
@@ -736,7 +662,7 @@ static void alarm_start(void)
     if (g_alarm.repeat == ALARM_REPEAT_ONCE && g_alarm.enabled)
     {
         g_alarm.enabled = false;
-        alarm_save_to_nvs();
+        alarm_save_to_nvs(&g_alarm);
     }
 
     if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
@@ -934,7 +860,7 @@ static void save_alarm_setting_and_exit(void)
 {
     g_alarm = g_alarm_edit;
     g_alarm_setting_mode = false;
-    alarm_save_to_nvs();
+    alarm_save_to_nvs(&g_alarm);
     update_ui();
 }
 
@@ -986,100 +912,6 @@ static void advance_alarm_field(void)
     }
 
     update_ui();
-}
-
-/* =========================
- * Calendar helpers
- * ========================= */
-static bool calendar_is_leap_year(int year)
-{
-    return ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0));
-}
-
-static int calendar_days_in_month(int year, int month)
-{
-    static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-
-    if (month < 1 || month > 12)
-    {
-        return 30;
-    }
-
-    if (month == 2 && calendar_is_leap_year(year))
-    {
-        return 29;
-    }
-
-    return days[month - 1];
-}
-
-static int calendar_first_wday(int year, int month)
-{
-    struct tm t = {0};
-    t.tm_year = year - 1900;
-    t.tm_mon = month - 1;
-    t.tm_mday = 1;
-    t.tm_hour = 12;
-    t.tm_isdst = -1;
-
-    time_t ts = mktime(&t);
-    if (ts == (time_t)-1)
-    {
-        return 0;
-    }
-
-    if (localtime_r(&ts, &t) == NULL)
-    {
-        return 0;
-    }
-
-    return t.tm_wday; /* 0=Sun */
-}
-
-static void calendar_reset_to_current_month(void)
-{
-    time_t now = time(NULL);
-    struct tm t;
-
-    if (localtime_r(&now, &t) != NULL)
-    {
-        g_calendar_year = t.tm_year + 1900;
-        g_calendar_month = t.tm_mon + 1;
-    }
-    else
-    {
-        g_calendar_year = 2025;
-        g_calendar_month = 1;
-    }
-}
-
-static void calendar_ensure_initialized(void)
-{
-    if (g_calendar_year <= 0 || g_calendar_month < 1 || g_calendar_month > 12)
-    {
-        calendar_reset_to_current_month();
-    }
-}
-
-static void calendar_change_month(int delta)
-{
-    calendar_ensure_initialized();
-
-    g_calendar_month += delta;
-
-    while (g_calendar_month < 1)
-    {
-        g_calendar_month += 12;
-        g_calendar_year--;
-    }
-
-    while (g_calendar_month > 12)
-    {
-        g_calendar_month -= 12;
-        g_calendar_year++;
-    }
-
-    ESP_LOGI(TAG, "月曆切換到: %04d/%02d", g_calendar_year, g_calendar_month);
 }
 
 /* =========================
@@ -1231,7 +1063,7 @@ static void menu_execute_selected(void)
         {
             g_last_clock_panel_before_calendar = current_panel;
         }
-        calendar_ensure_initialized();
+        calendar_ensure_initialized(&g_calendar_year, &g_calendar_month);
         current_panel = PANEL_CALENDAR;
         update_ui();
         break;
@@ -1841,7 +1673,7 @@ static void update_calendar_ui_locked(bool valid_time)
         return;
     }
 
-    calendar_ensure_initialized();
+    calendar_ensure_initialized(&g_calendar_year, &g_calendar_month);
 
     lv_label_set_text_fmt(calendar_month_label, "%04d/%02d", g_calendar_year, g_calendar_month);
 
@@ -3102,19 +2934,19 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
             switch (button_id)
             {
             case BUTTON_UP:
-                calendar_change_month(-1);
+                calendar_change_month(&g_calendar_year, &g_calendar_month, -1);
                 update_ui();
                 break;
 
             case BUTTON_DOWN:
-                calendar_change_month(+1);
+                calendar_change_month(&g_calendar_year, &g_calendar_month, +1);
                 update_ui();
                 break;
 
             case BUTTON_CENTER:
                 if (event_type == BUTTON_SHORT_PRESS)
                 {
-                    calendar_reset_to_current_month();
+                    calendar_reset_to_current_month(&g_calendar_year, &g_calendar_month);
                     ESP_LOGI(TAG, "月曆回到本月");
                     update_ui();
                 }
@@ -3277,7 +3109,7 @@ void app_main(void)
     ESP_LOGI(TAG, "初始化 Weather 模組...");
     weather_init();
 
-    alarm_load_from_nvs();
+    alarm_load_from_nvs(&g_alarm);
 
     if (woke_from_deep_sleep && s_rtc_time_valid)
     {
@@ -3340,7 +3172,7 @@ void app_main(void)
         g_wifi_failed = false;
     }
 
-    calendar_ensure_initialized();
+    calendar_ensure_initialized(&g_calendar_year, &g_calendar_month);
     update_ui();
 
     ESP_LOGI(TAG, "進入主迴圈");
