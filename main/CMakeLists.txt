@@ -1,5 +1,11 @@
 idf_component_register(
-    SRCS "alarm_logic.c" "calendar_logic.c" "app_state.c" "main.c"
+    SRCS
+        "alarm_logic.c"
+        "calendar_logic.c"
+        "app_state.c"
+        "input_handler.c"
+        "ui.c"
+        "main.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
