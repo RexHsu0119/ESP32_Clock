@@ -1,10 +1,18 @@
 idf_component_register(
     SRCS
         "alarm_logic.c"
-        "calendar_logic.c"
+        "alarm_runtime.c"
         "app_state.c"
+        "app_bootstrap.c"
+        "app_runtime.c"
+        "calendar_logic.c"
+        "calendar_ui.c"
         "input_handler.c"
+        "menu_logic.c"
+        "network_sync.c"
+        "settings_logic.c"
         "ui.c"
+        "ui_clock.c"
         "main.c"
     INCLUDE_DIRS "."
     REQUIRES

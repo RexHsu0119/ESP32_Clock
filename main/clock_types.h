@@ -1,0 +1,70 @@
+#pragma once
+
+#include <stdbool.h>
+
+typedef enum
+{
+    PANEL_DIGITAL = 0,
+    PANEL_ANALOG,
+    PANEL_CALENDAR,
+} clock_panel_t;
+
+typedef enum
+{
+    SET_FIELD_HOUR = 0,
+    SET_FIELD_MINUTE,
+    SET_FIELD_SECOND,
+} time_set_field_t;
+
+typedef enum
+{
+    APP_MODE_CLOCK = 0,
+    APP_MODE_WIFI_PORTAL,
+} app_mode_t;
+
+typedef enum
+{
+    BOOT_HINT_NONE = 0,
+    BOOT_HINT_FORCE_SETUP,
+    BOOT_HINT_CLEAR_WIFI,
+} boot_hint_t;
+
+typedef enum
+{
+    ALARM_REPEAT_ONCE = 0,
+    ALARM_REPEAT_DAILY,
+} alarm_repeat_t;
+
+typedef enum
+{
+    ALARM_FIELD_ENABLE = 0,
+    ALARM_FIELD_REPEAT,
+    ALARM_FIELD_HOUR,
+    ALARM_FIELD_MINUTE,
+} alarm_set_field_t;
+
+typedef enum
+{
+    MENU_ITEM_ALARM = 0,
+    MENU_ITEM_SET_TIME,
+    MENU_ITEM_CALENDAR,
+    MENU_ITEM_WIFI_SETUP,
+    MENU_ITEM_CLEAR_WIFI,
+    MENU_ITEM_SYNC_NOW,
+    MENU_ITEM_DEEP_SLEEP,
+    MENU_ITEM_COUNT,
+} menu_item_t;
+
+typedef enum
+{
+    CONFIRM_NONE = 0,
+    CONFIRM_CLEAR_WIFI,
+} confirm_action_t;
+
+typedef struct
+{
+    bool enabled;
+    int hour;
+    int minute;
+    alarm_repeat_t repeat;
+} alarm_config_t;

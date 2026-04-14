@@ -41,6 +41,7 @@ static lv_obj_t *s_confirm_yes_label = NULL;
 static lv_obj_t *s_confirm_help_label = NULL;
 
 /* portal ui */
+static lv_obj_t *s_portal_container = NULL;
 static lv_obj_t *s_portal_title_label = NULL;
 static lv_obj_t *s_portal_line1_label = NULL;
 static lv_obj_t *s_portal_line2_label = NULL;
@@ -629,15 +630,15 @@ void ui_update_confirm_overlay_locked(bool confirm_open,
  * ========================= */
 void ui_create_portal_ui(lv_obj_t *scr)
 {
-    lv_obj_t *portal_container = lv_obj_create(scr);
-    lv_obj_set_size(portal_container, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    lv_obj_center(portal_container);
-    lv_obj_set_style_bg_opa(portal_container, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(portal_container, 0, 0);
-    lv_obj_set_style_pad_all(portal_container, 0, 0);
-    lv_obj_clear_flag(portal_container, LV_OBJ_FLAG_SCROLLABLE);
+    s_portal_container = lv_obj_create(scr);
+    lv_obj_set_size(s_portal_container, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_center(s_portal_container);
+    lv_obj_set_style_bg_opa(s_portal_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_portal_container, 0, 0);
+    lv_obj_set_style_pad_all(s_portal_container, 0, 0);
+    lv_obj_clear_flag(s_portal_container, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_portal_title_label = lv_label_create(portal_container);
+    s_portal_title_label = lv_label_create(s_portal_container);
     lv_obj_set_width(s_portal_title_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(s_portal_title_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(s_portal_title_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -646,7 +647,7 @@ void ui_create_portal_ui(lv_obj_t *scr)
     lv_label_set_text(s_portal_title_label, "WIFI SETUP");
     lv_obj_set_pos(s_portal_title_label, 0, 6);
 
-    s_portal_line1_label = lv_label_create(portal_container);
+    s_portal_line1_label = lv_label_create(s_portal_container);
     lv_obj_set_width(s_portal_line1_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(s_portal_line1_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(s_portal_line1_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -655,7 +656,7 @@ void ui_create_portal_ui(lv_obj_t *scr)
     lv_label_set_text(s_portal_line1_label, "AP: ClockSetup");
     lv_obj_set_pos(s_portal_line1_label, 0, 30);
 
-    s_portal_line2_label = lv_label_create(portal_container);
+    s_portal_line2_label = lv_label_create(s_portal_container);
     lv_obj_set_width(s_portal_line2_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(s_portal_line2_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(s_portal_line2_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -664,7 +665,7 @@ void ui_create_portal_ui(lv_obj_t *scr)
     lv_label_set_text(s_portal_line2_label, "IP: 192.168.4.1");
     lv_obj_set_pos(s_portal_line2_label, 0, 46);
 
-    s_portal_line3_label = lv_label_create(portal_container);
+    s_portal_line3_label = lv_label_create(s_portal_container);
     lv_obj_set_width(s_portal_line3_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(s_portal_line3_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(s_portal_line3_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -673,7 +674,7 @@ void ui_create_portal_ui(lv_obj_t *scr)
     lv_label_set_text(s_portal_line3_label, "Connect by phone");
     lv_obj_set_pos(s_portal_line3_label, 0, 70);
 
-    s_portal_line4_label = lv_label_create(portal_container);
+    s_portal_line4_label = lv_label_create(s_portal_container);
     lv_obj_set_width(s_portal_line4_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(s_portal_line4_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(s_portal_line4_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -682,7 +683,7 @@ void ui_create_portal_ui(lv_obj_t *scr)
     lv_label_set_text(s_portal_line4_label, "Open http://192.168.4.1");
     lv_obj_set_pos(s_portal_line4_label, 0, 86);
 
-    s_portal_footer_label = lv_label_create(portal_container);
+    s_portal_footer_label = lv_label_create(s_portal_container);
     lv_obj_set_width(s_portal_footer_label, DISPLAY_WIDTH);
     lv_label_set_long_mode(s_portal_footer_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(s_portal_footer_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -690,6 +691,23 @@ void ui_create_portal_ui(lv_obj_t *scr)
     lv_obj_set_style_text_font(s_portal_footer_label, &lv_font_montserrat_10, 0);
     lv_label_set_text(s_portal_footer_label, "Waiting for setup");
     lv_obj_set_pos(s_portal_footer_label, 0, 110);
+}
+
+void ui_set_portal_visible(bool visible)
+{
+    if (s_portal_container == NULL)
+    {
+        return;
+    }
+
+    if (visible)
+    {
+        lv_obj_clear_flag(s_portal_container, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+    {
+        lv_obj_add_flag(s_portal_container, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void ui_update_portal_ui(void)

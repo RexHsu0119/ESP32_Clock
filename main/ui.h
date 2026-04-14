@@ -51,6 +51,7 @@ extern "C"
                                           bool yes_selected);
 
     void ui_create_portal_ui(lv_obj_t *scr);
+    void ui_set_portal_visible(bool visible);
     void ui_update_portal_ui(void);
 
 #ifdef __cplusplus
