@@ -187,14 +187,28 @@ void input_handler_handle_button(const input_handler_state_t *state,
             switch (button_id)
             {
             case BUTTON_UP:
-                if (ops->calendar_change_month != NULL)
+                if (state->calendar_adjust_year_selected)
+                {
+                    if (ops->calendar_change_year != NULL)
+                    {
+                        ops->calendar_change_year(-1);
+                    }
+                }
+                else if (ops->calendar_change_month != NULL)
                 {
                     ops->calendar_change_month(-1);
                 }
                 break;
 
             case BUTTON_DOWN:
-                if (ops->calendar_change_month != NULL)
+                if (state->calendar_adjust_year_selected)
+                {
+                    if (ops->calendar_change_year != NULL)
+                    {
+                        ops->calendar_change_year(+1);
+                    }
+                }
+                else if (ops->calendar_change_month != NULL)
                 {
                     ops->calendar_change_month(+1);
                 }
@@ -210,9 +224,9 @@ void input_handler_handle_button(const input_handler_state_t *state,
 
             case BUTTON_COMBO_UP_DOWN:
                 if (event_type == BUTTON_SHORT_PRESS &&
-                    ops->start_manual_resync != NULL)
+                    ops->calendar_toggle_adjust_field != NULL)
                 {
-                    ops->start_manual_resync();
+                    ops->calendar_toggle_adjust_field();
                 }
                 break;
 
@@ -244,13 +258,6 @@ void input_handler_handle_button(const input_handler_state_t *state,
                 if (ops->menu_open != NULL)
                 {
                     ops->menu_open();
-                }
-                break;
-
-            case BUTTON_COMBO_UP_DOWN:
-                if (ops->start_manual_resync != NULL)
-                {
-                    ops->start_manual_resync();
                 }
                 break;
 

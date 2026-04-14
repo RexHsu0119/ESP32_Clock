@@ -107,11 +107,11 @@ static void ih_save_time_setting_and_exit(void);
 static void ih_enter_time_setting_mode(void);
 static void ih_enter_alarm_setting_mode(void);
 
+static void ih_calendar_toggle_adjust_field(void);
+static void ih_calendar_change_year(int delta);
 static void ih_calendar_change_month(int delta);
 static void ih_calendar_reset_to_current_month(void);
 static void ih_calendar_return_to_previous_clock(void);
-
-static void ih_start_manual_resync(void);
 
 static void ih_set_panel_digital(void);
 static void ih_set_panel_analog(void);
@@ -156,6 +156,7 @@ static menu_logic_context_t g_menu_logic = {
     .request_clear_wifi = &g_app.request_clear_wifi,
     .current_panel = &g_app.current_panel,
     .last_clock_panel_before_calendar = &g_app.last_clock_panel_before_calendar,
+    .calendar_adjust_field = &g_app.calendar_adjust_field,
     .calendar_year = &g_app.calendar_year,
     .calendar_month = &g_app.calendar_month,
     .enter_time_setting_mode = enter_time_setting_mode,
@@ -253,6 +254,7 @@ static alarm_runtime_context_t g_alarm_runtime = {
 #define g_confirm_open g_app.confirm_open
 #define g_confirm_action g_app.confirm_action
 #define g_confirm_yes_selected g_app.confirm_yes_selected
+#define g_calendar_adjust_field g_app.calendar_adjust_field
 #define g_calendar_year g_app.calendar_year
 #define g_calendar_month g_app.calendar_month
 #define lvgl_mutex g_app.lvgl_mutex
@@ -680,7 +682,10 @@ static void update_ui(void)
         }
 
         set_weather_text();
-        calendar_ui_update(valid_time, &g_calendar_year, &g_calendar_month);
+        calendar_ui_update(valid_time,
+                           g_calendar_adjust_field,
+                           &g_calendar_year,
+                           &g_calendar_month);
 
         ui_update_alarm_overlay_locked(g_alarm_setting_mode,
                                        (int)g_alarm_set_field,
@@ -757,6 +762,7 @@ static input_handler_state_t build_input_handler_state(void)
         .alarm_setting_mode = g_alarm_setting_mode,
         .time_setting_mode = is_setting_time,
         .calendar_active = (current_panel == PANEL_CALENDAR),
+        .calendar_adjust_year_selected = (g_calendar_adjust_field == CALENDAR_ADJUST_YEAR),
         .digital_active = (current_panel == PANEL_DIGITAL),
         .analog_active = (current_panel == PANEL_ANALOG),
     };
@@ -858,14 +864,31 @@ static void ih_enter_alarm_setting_mode(void)
     ui_refresh();
 }
 
+static void ih_calendar_toggle_adjust_field(void)
+{
+    g_calendar_adjust_field = (g_calendar_adjust_field == CALENDAR_ADJUST_YEAR)
+                                  ? CALENDAR_ADJUST_MONTH
+                                  : CALENDAR_ADJUST_YEAR;
+    ui_refresh();
+}
+
+static void ih_calendar_change_year(int delta)
+{
+    g_calendar_adjust_field = CALENDAR_ADJUST_YEAR;
+    calendar_change_year(&g_calendar_year, &g_calendar_month, delta);
+    ui_refresh();
+}
+
 static void ih_calendar_change_month(int delta)
 {
+    g_calendar_adjust_field = CALENDAR_ADJUST_MONTH;
     calendar_change_month(&g_calendar_year, &g_calendar_month, delta);
     ui_refresh();
 }
 
 static void ih_calendar_reset_to_current_month(void)
 {
+    g_calendar_adjust_field = CALENDAR_ADJUST_MONTH;
     calendar_reset_to_current_month(&g_calendar_year, &g_calendar_month);
     ESP_LOGI(TAG, "月曆回到本月");
     ui_refresh();
@@ -875,11 +898,6 @@ static void ih_calendar_return_to_previous_clock(void)
 {
     current_panel = g_last_clock_panel_before_calendar;
     ui_refresh();
-}
-
-static void ih_start_manual_resync(void)
-{
-    start_manual_resync();
 }
 
 static void ih_set_panel_digital(void)
@@ -924,11 +942,11 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
         .enter_time_setting_mode = ih_enter_time_setting_mode,
         .enter_alarm_setting_mode = ih_enter_alarm_setting_mode,
 
+        .calendar_toggle_adjust_field = ih_calendar_toggle_adjust_field,
+        .calendar_change_year = ih_calendar_change_year,
         .calendar_change_month = ih_calendar_change_month,
         .calendar_reset_to_current_month = ih_calendar_reset_to_current_month,
         .calendar_return_to_previous_clock = ih_calendar_return_to_previous_clock,
-
-        .start_manual_resync = ih_start_manual_resync,
 
         .set_panel_digital = ih_set_panel_digital,
         .set_panel_analog = ih_set_panel_analog,

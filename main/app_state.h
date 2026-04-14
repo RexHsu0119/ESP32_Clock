@@ -59,6 +59,7 @@ extern "C"
         confirm_action_t confirm_action;
         bool confirm_yes_selected;
 
+        calendar_adjust_field_t calendar_adjust_field;
         int calendar_year;
         int calendar_month;
 

@@ -49,6 +49,7 @@ app_context_t g_app = {
     .confirm_action = CONFIRM_NONE,
     .confirm_yes_selected = false,
 
+    .calendar_adjust_field = CALENDAR_ADJUST_MONTH,
     .calendar_year = 0,
     .calendar_month = 0,
 

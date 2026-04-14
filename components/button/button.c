@@ -53,7 +53,7 @@ static TaskHandle_t button_event_task_handle = NULL;
 #define BUTTON_CHECK_INTERVAL 10
 
 /* 長按連續輸入參數（UP / DOWN） */
-#define REPEAT_START_TIME_MS 400
+#define REPEAT_START_TIME_MS 800
 #define REPEAT_INTERVAL_MS 120
 
 /* 調大 button_scan stack，避免 stack overflow */

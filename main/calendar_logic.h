@@ -17,6 +17,9 @@ extern "C"
     /* 若 year/month 無效則重設到當月 */
     void calendar_ensure_initialized(int *year, int *month);
 
+    /* delta 可為正負；會保留 month 不變 */
+    void calendar_change_year(int *year, int *month, int delta);
+
     /* delta 可為正負；會自動跨年 */
     void calendar_change_month(int *year, int *month, int delta);
 

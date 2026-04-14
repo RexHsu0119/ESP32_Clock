@@ -17,6 +17,7 @@ extern "C"
         bool alarm_setting_mode;
         bool time_setting_mode;
         bool calendar_active;
+        bool calendar_adjust_year_selected;
         bool digital_active;
         bool analog_active;
     } input_handler_state_t;
@@ -47,11 +48,11 @@ extern "C"
         void (*enter_time_setting_mode)(void);
         void (*enter_alarm_setting_mode)(void);
 
+        void (*calendar_toggle_adjust_field)(void);
+        void (*calendar_change_year)(int delta);
         void (*calendar_change_month)(int delta);
         void (*calendar_reset_to_current_month)(void);
         void (*calendar_return_to_previous_clock)(void);
-
-        void (*start_manual_resync)(void);
 
         void (*set_panel_digital)(void);
         void (*set_panel_analog)(void);

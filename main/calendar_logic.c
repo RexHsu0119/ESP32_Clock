@@ -84,6 +84,23 @@ void calendar_ensure_initialized(int *year, int *month)
     }
 }
 
+void calendar_change_year(int *year, int *month, int delta)
+{
+    if (year == NULL || month == NULL)
+    {
+        return;
+    }
+
+    calendar_ensure_initialized(year, month);
+
+    *year += delta;
+
+    if (*year <= 0)
+    {
+        *year = 1;
+    }
+}
+
 void calendar_change_month(int *year, int *month, int delta)
 {
     if (year == NULL || month == NULL)

@@ -57,6 +57,12 @@ typedef enum
 
 typedef enum
 {
+    CALENDAR_ADJUST_MONTH = 0,
+    CALENDAR_ADJUST_YEAR,
+} calendar_adjust_field_t;
+
+typedef enum
+{
     CONFIRM_NONE = 0,
     CONFIRM_CLEAR_WIFI,
 } confirm_action_t;
