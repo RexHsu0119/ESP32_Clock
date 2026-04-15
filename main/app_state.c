@@ -40,6 +40,17 @@ app_context_t g_app = {
     .alarm_last_flash_us = 0,
     .alarm_sound_task_handle = NULL,
 
+    .timer_mode = false,
+    .timer_state = TIMER_STATE_IDLE,
+    .timer_set_field = TIMER_FIELD_HOUR,
+    .timer_hours = 0,
+    .timer_minutes = 0,
+    .timer_seconds = 0,
+    .timer_remaining_seconds = 0,
+    .timer_end_time_us = 0,
+    .timer_alert_active = false,
+    .timer_alert_task_handle = NULL,
+
     .alarm_last_trigger_year = {-1, -1, -1},
     .alarm_last_trigger_yday = {-1, -1, -1},
     .alarm_last_trigger_hour = {-1, -1, -1},

@@ -1,5 +1,7 @@
 #include "ui.h"
 
+#include <stdio.h>
+
 #include "esp_timer.h"
 #include "display.h"
 #include "wifi_portal.h"
@@ -30,10 +32,22 @@ static lv_obj_t *s_alarm_minute_label = NULL;
 static lv_obj_t *s_alarm_status_prefix_label = NULL;
 static lv_obj_t *s_alarm_status_label = NULL;
 
+/* timer overlay */
+static lv_obj_t *s_timer_overlay = NULL;
+static lv_obj_t *s_timer_title_label = NULL;
+static lv_obj_t *s_timer_hour_label = NULL;
+static lv_obj_t *s_timer_colon1_label = NULL;
+static lv_obj_t *s_timer_minute_label = NULL;
+static lv_obj_t *s_timer_colon2_label = NULL;
+static lv_obj_t *s_timer_second_label = NULL;
+static lv_obj_t *s_timer_status_label = NULL;
+static lv_obj_t *s_timer_help_label = NULL;
+
 /* menu overlay */
 static lv_obj_t *s_menu_overlay = NULL;
 static lv_obj_t *s_menu_title_label = NULL;
 static lv_obj_t *s_menu_help_label = NULL;
+static lv_obj_t *s_menu_row_bg[4] = {0};
 static lv_obj_t *s_menu_item_labels[4] = {0};
 
 /* confirm overlay */
@@ -63,6 +77,27 @@ static const char *alarm_list_state_text(const alarm_config_t *alarm)
     }
 
     return alarm_repeat_text(alarm->repeat);
+}
+
+static void timer_format_hms_from_seconds(int total_seconds, int *hours, int *minutes, int *seconds)
+{
+    if (total_seconds < 0)
+    {
+        total_seconds = 0;
+    }
+
+    if (hours != NULL)
+    {
+        *hours = total_seconds / 3600;
+    }
+    if (minutes != NULL)
+    {
+        *minutes = (total_seconds % 3600) / 60;
+    }
+    if (seconds != NULL)
+    {
+        *seconds = total_seconds % 60;
+    }
 }
 
 void ui_init(SemaphoreHandle_t mutex, ui_refresh_cb_t refresh_cb)
@@ -331,6 +366,276 @@ void ui_alarm_overlay_move_foreground(void)
     }
 }
 
+void ui_create_timer_overlay(lv_obj_t *scr)
+{
+    s_timer_overlay = lv_obj_create(scr);
+    lv_obj_set_size(s_timer_overlay, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_center(s_timer_overlay);
+    lv_obj_set_style_bg_color(s_timer_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_timer_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_timer_overlay, 0, 0);
+    lv_obj_set_style_pad_all(s_timer_overlay, 0, 0);
+    lv_obj_clear_flag(s_timer_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_timer_overlay, LV_OBJ_FLAG_HIDDEN);
+
+    s_timer_title_label = lv_label_create(s_timer_overlay);
+    lv_obj_set_width(s_timer_title_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(s_timer_title_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(s_timer_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_timer_title_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(s_timer_title_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_timer_title_label, "TIMER");
+    lv_obj_set_pos(s_timer_title_label, 0, 8);
+
+    s_timer_hour_label = lv_label_create(s_timer_overlay);
+    lv_obj_set_width(s_timer_hour_label, 32);
+    lv_obj_set_style_text_align(s_timer_hour_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_timer_hour_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(s_timer_hour_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(s_timer_hour_label, "00");
+    lv_obj_set_pos(s_timer_hour_label, 18, 34);
+
+    s_timer_colon1_label = lv_label_create(s_timer_overlay);
+    lv_obj_set_width(s_timer_colon1_label, 10);
+    lv_obj_set_style_text_align(s_timer_colon1_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_timer_colon1_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(s_timer_colon1_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(s_timer_colon1_label, ":");
+    lv_obj_set_pos(s_timer_colon1_label, 50, 34);
+
+    s_timer_minute_label = lv_label_create(s_timer_overlay);
+    lv_obj_set_width(s_timer_minute_label, 32);
+    lv_obj_set_style_text_align(s_timer_minute_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_timer_minute_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(s_timer_minute_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(s_timer_minute_label, "00");
+    lv_obj_set_pos(s_timer_minute_label, 60, 34);
+
+    s_timer_colon2_label = lv_label_create(s_timer_overlay);
+    lv_obj_set_width(s_timer_colon2_label, 10);
+    lv_obj_set_style_text_align(s_timer_colon2_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_timer_colon2_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(s_timer_colon2_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(s_timer_colon2_label, ":");
+    lv_obj_set_pos(s_timer_colon2_label, 92, 34);
+
+    s_timer_second_label = lv_label_create(s_timer_overlay);
+    lv_obj_set_width(s_timer_second_label, 32);
+    lv_obj_set_style_text_align(s_timer_second_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_timer_second_label, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_text_font(s_timer_second_label, &lv_font_montserrat_24, 0);
+    lv_label_set_text(s_timer_second_label, "00");
+    lv_obj_set_pos(s_timer_second_label, 102, 34);
+
+    s_timer_status_label = lv_label_create(s_timer_overlay);
+    lv_obj_set_width(s_timer_status_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(s_timer_status_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(s_timer_status_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_timer_status_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(s_timer_status_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_timer_status_label, "SET");
+    lv_obj_set_pos(s_timer_status_label, 0, 72);
+
+    s_timer_help_label = lv_label_create(s_timer_overlay);
+    lv_obj_set_width(s_timer_help_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(s_timer_help_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(s_timer_help_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_timer_help_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(s_timer_help_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(s_timer_help_label, "UP/DN adj  U+D clear\nCENTER next  LONG start");
+    lv_obj_set_pos(s_timer_help_label, 0, 102);
+}
+
+void ui_update_timer_overlay_locked(bool timer_mode,
+                                    int timer_state,
+                                    int timer_field,
+                                    int timer_hours,
+                                    int timer_minutes,
+                                    int timer_seconds,
+                                    int remaining_seconds)
+{
+    bool blink_on;
+    bool show_hour = true;
+    bool show_minute = true;
+    bool show_second = true;
+    int display_hours = timer_hours;
+    int display_minutes = timer_minutes;
+    int display_seconds = timer_seconds;
+    lv_color_t time_color = lv_color_hex(0xFFFFFF);
+    lv_color_t colon_color = lv_color_hex(0xFFFFFF);
+    char hour_buf[3] = "00";
+    char minute_buf[3] = "00";
+    char second_buf[3] = "00";
+
+    if (s_timer_overlay == NULL)
+    {
+        return;
+    }
+
+    if (!timer_mode)
+    {
+        lv_obj_add_flag(s_timer_overlay, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    if (timer_state == TIMER_STATE_RUNNING || timer_state == TIMER_STATE_PAUSED || timer_state == TIMER_STATE_DONE)
+    {
+        timer_format_hms_from_seconds(remaining_seconds, &display_hours, &display_minutes, &display_seconds);
+    }
+
+    blink_on = ((esp_timer_get_time() / UI_SETTING_BLINK_PERIOD_US) % 2) == 0;
+    if (timer_state == TIMER_STATE_SET && !blink_on)
+    {
+        switch (timer_field)
+        {
+        case TIMER_FIELD_HOUR:
+            show_hour = false;
+            break;
+        case TIMER_FIELD_MINUTE:
+            show_minute = false;
+            break;
+        case TIMER_FIELD_SECOND:
+            show_second = false;
+            break;
+        }
+    }
+
+    if (timer_state == TIMER_STATE_SET || timer_state == TIMER_STATE_IDLE)
+    {
+        time_color = lv_color_hex(0xFF0000);
+        colon_color = lv_color_hex(0xFF0000);
+    }
+    else if (timer_state == TIMER_STATE_DONE && blink_on)
+    {
+        time_color = lv_color_hex(0xFFE082);
+        colon_color = lv_color_hex(0xFFB300);
+    }
+
+    lv_obj_set_style_bg_color(s_timer_overlay,
+                              (timer_state == TIMER_STATE_DONE && blink_on)
+                                  ? lv_color_hex(0x500000)
+                                  : lv_color_hex(0x000000),
+                              0);
+
+    if (show_hour)
+    {
+        snprintf(hour_buf, sizeof(hour_buf), "%02d", display_hours);
+    }
+    else
+    {
+        hour_buf[0] = ' ';
+        hour_buf[1] = ' ';
+        hour_buf[2] = '\0';
+    }
+
+    if (show_minute)
+    {
+        snprintf(minute_buf, sizeof(minute_buf), "%02d", display_minutes);
+    }
+    else
+    {
+        minute_buf[0] = ' ';
+        minute_buf[1] = ' ';
+        minute_buf[2] = '\0';
+    }
+
+    if (show_second)
+    {
+        snprintf(second_buf, sizeof(second_buf), "%02d", display_seconds);
+    }
+    else
+    {
+        second_buf[0] = ' ';
+        second_buf[1] = ' ';
+        second_buf[2] = '\0';
+    }
+
+    if (s_timer_title_label != NULL)
+    {
+        lv_label_set_text(s_timer_title_label, "TIMER");
+    }
+
+    if (s_timer_hour_label != NULL)
+    {
+        lv_obj_set_style_text_color(s_timer_hour_label, time_color, 0);
+        lv_label_set_text(s_timer_hour_label, hour_buf);
+    }
+
+    if (s_timer_colon1_label != NULL)
+    {
+        lv_obj_set_style_text_color(s_timer_colon1_label, colon_color, 0);
+        lv_label_set_text(s_timer_colon1_label, ":");
+    }
+
+    if (s_timer_minute_label != NULL)
+    {
+        lv_obj_set_style_text_color(s_timer_minute_label, time_color, 0);
+        lv_label_set_text(s_timer_minute_label, minute_buf);
+    }
+
+    if (s_timer_colon2_label != NULL)
+    {
+        lv_obj_set_style_text_color(s_timer_colon2_label, colon_color, 0);
+        lv_label_set_text(s_timer_colon2_label, ":");
+    }
+
+    if (s_timer_second_label != NULL)
+    {
+        lv_obj_set_style_text_color(s_timer_second_label, time_color, 0);
+        lv_label_set_text(s_timer_second_label, second_buf);
+    }
+
+    if (s_timer_status_label != NULL)
+    {
+        lv_obj_set_style_text_color(s_timer_status_label,
+                                    (timer_state == TIMER_STATE_DONE && blink_on)
+                                        ? lv_color_hex(0xFFB300)
+                                        : lv_color_hex(0x00FFCC),
+                                    0);
+        switch (timer_state)
+        {
+        case TIMER_STATE_RUNNING:
+            lv_label_set_text(s_timer_status_label, "RUNNING");
+            break;
+        case TIMER_STATE_PAUSED:
+            lv_label_set_text(s_timer_status_label, "PAUSED");
+            break;
+        case TIMER_STATE_DONE:
+            lv_label_set_text(s_timer_status_label, "DONE");
+            break;
+        case TIMER_STATE_SET:
+        case TIMER_STATE_IDLE:
+        default:
+            lv_label_set_text(s_timer_status_label, "SET");
+            break;
+        }
+    }
+
+    if (s_timer_help_label != NULL)
+    {
+        switch (timer_state)
+        {
+        case TIMER_STATE_RUNNING:
+            lv_label_set_text(s_timer_help_label, "CENTER pause  U+D cancel\nLONG back");
+            break;
+        case TIMER_STATE_PAUSED:
+            lv_label_set_text(s_timer_help_label, "CENTER resume  U+D cancel\nLONG back");
+            break;
+        case TIMER_STATE_DONE:
+            lv_label_set_text(s_timer_help_label, "Press any key to close");
+            break;
+        case TIMER_STATE_SET:
+        case TIMER_STATE_IDLE:
+        default:
+            lv_label_set_text(s_timer_help_label, "UP/DN adj  U+D clear\nCENTER next  LONG start");
+            break;
+        }
+    }
+
+    lv_obj_clear_flag(s_timer_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_timer_overlay);
+}
+
 void ui_update_alarm_overlay_locked(bool alarm_setting_mode,
                                     int alarm_ui_mode,
                                     int selected_alarm_index,
@@ -534,14 +839,24 @@ void ui_create_menu_overlay(lv_obj_t *scr)
 
     for (int i = 0; i < 4; i++)
     {
+        s_menu_row_bg[i] = lv_obj_create(s_menu_overlay);
+        lv_obj_set_size(s_menu_row_bg[i], DISPLAY_WIDTH - 8, 20);
+        lv_obj_set_pos(s_menu_row_bg[i], 4, 27 + i * 18);
+        lv_obj_set_style_bg_color(s_menu_row_bg[i], lv_color_hex(0x00FFCC), 0);
+        lv_obj_set_style_bg_opa(s_menu_row_bg[i], LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(s_menu_row_bg[i], 0, 0);
+        lv_obj_set_style_radius(s_menu_row_bg[i], 4, 0);
+        lv_obj_set_style_pad_all(s_menu_row_bg[i], 0, 0);
+        lv_obj_clear_flag(s_menu_row_bg[i], LV_OBJ_FLAG_SCROLLABLE);
+
         s_menu_item_labels[i] = lv_label_create(s_menu_overlay);
-        lv_obj_set_width(s_menu_item_labels[i], DISPLAY_WIDTH - 20);
+        lv_obj_set_width(s_menu_item_labels[i], DISPLAY_WIDTH - 24);
         lv_label_set_long_mode(s_menu_item_labels[i], LV_LABEL_LONG_CLIP);
         lv_obj_set_style_text_align(s_menu_item_labels[i], LV_TEXT_ALIGN_LEFT, 0);
         lv_obj_set_style_text_color(s_menu_item_labels[i], lv_color_hex(0xFFFFFF), 0);
         lv_obj_set_style_text_font(s_menu_item_labels[i], &lv_font_montserrat_12, 0);
         lv_label_set_text(s_menu_item_labels[i], "");
-        lv_obj_set_pos(s_menu_item_labels[i], 16, 30 + i * 16);
+        lv_obj_set_pos(s_menu_item_labels[i], 12, 31 + i * 18);
     }
 
     s_menu_help_label = lv_label_create(s_menu_overlay);
@@ -588,6 +903,10 @@ void ui_update_menu_overlay_locked(bool menu_open,
 
         if (item_index >= item_count)
         {
+            if (s_menu_row_bg[i] != NULL)
+            {
+                lv_obj_add_flag(s_menu_row_bg[i], LV_OBJ_FLAG_HIDDEN);
+            }
             lv_label_set_text(s_menu_item_labels[i], "");
             continue;
         }
@@ -595,16 +914,22 @@ void ui_update_menu_overlay_locked(bool menu_open,
         bool is_selected = (item_index == selected);
         const char *text = (item_text_cb != NULL) ? item_text_cb(item_index) : "";
 
-        lv_label_set_text_fmt(s_menu_item_labels[i], "%c %s",
-                              is_selected ? '>' : ' ',
-                              text);
+        if (s_menu_row_bg[i] != NULL)
+        {
+            lv_obj_clear_flag(s_menu_row_bg[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_bg_opa(s_menu_row_bg[i],
+                                    is_selected ? LV_OPA_COVER : LV_OPA_TRANSP,
+                                    0);
+        }
+
+        lv_label_set_text(s_menu_item_labels[i], text);
 
         lv_obj_set_style_text_color(s_menu_item_labels[i],
-                                    is_selected ? lv_color_hex(0xFF4040) : lv_color_hex(0xFFFFFF),
+                                    is_selected ? lv_color_hex(0x101010) : lv_color_hex(0xFFFFFF),
                                     0);
 
         lv_obj_set_style_text_font(s_menu_item_labels[i],
-                                   is_selected ? &lv_font_montserrat_14 : &lv_font_montserrat_12,
+                                   &lv_font_montserrat_12,
                                    0);
     }
 

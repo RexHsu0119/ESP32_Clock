@@ -36,6 +36,17 @@ extern "C"
         int64_t alarm_last_flash_us;
         TaskHandle_t alarm_sound_task_handle;
 
+        bool timer_mode;
+        timer_state_t timer_state;
+        timer_set_field_t timer_set_field;
+        int timer_hours;
+        int timer_minutes;
+        int timer_seconds;
+        int32_t timer_remaining_seconds;
+        int64_t timer_end_time_us;
+        volatile bool timer_alert_active;
+        TaskHandle_t timer_alert_task_handle;
+
         int alarm_last_trigger_year[ALARM_SLOT_COUNT];
         int alarm_last_trigger_yday[ALARM_SLOT_COUNT];
         int alarm_last_trigger_hour[ALARM_SLOT_COUNT];

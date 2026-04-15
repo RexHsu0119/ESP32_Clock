@@ -20,6 +20,8 @@ extern "C"
     void alarm_runtime_stop(const alarm_runtime_context_t *ctx);
     void alarm_runtime_check_trigger(const alarm_runtime_context_t *ctx);
     void alarm_runtime_update_flash_effect(const alarm_runtime_context_t *ctx);
+    void alarm_runtime_start_timer_alert(const alarm_runtime_context_t *ctx);
+    void alarm_runtime_stop_timer_alert(const alarm_runtime_context_t *ctx);
 
 #ifdef __cplusplus
 }

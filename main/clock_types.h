@@ -52,7 +52,24 @@ typedef enum
 
 typedef enum
 {
+    TIMER_FIELD_HOUR = 0,
+    TIMER_FIELD_MINUTE,
+    TIMER_FIELD_SECOND,
+} timer_set_field_t;
+
+typedef enum
+{
+    TIMER_STATE_IDLE = 0,
+    TIMER_STATE_SET,
+    TIMER_STATE_RUNNING,
+    TIMER_STATE_PAUSED,
+    TIMER_STATE_DONE,
+} timer_state_t;
+
+typedef enum
+{
     MENU_ITEM_ALARM = 0,
+    MENU_ITEM_TIMER,
     MENU_ITEM_SET_TIME,
     MENU_ITEM_CALENDAR,
     MENU_ITEM_WIFI_SETUP,

@@ -203,6 +203,10 @@ void alarm_runtime_apply_background_state_locked(const alarm_runtime_context_t *
     {
         alarm_set_background_locked(app->alarm_flash_on ? lv_color_hex(0x707000) : lv_color_hex(0x000000));
     }
+    else if (app->timer_alert_active)
+    {
+        alarm_set_background_locked(lv_color_hex(0x180000));
+    }
     else
     {
         alarm_set_background_locked(lv_color_hex(0x000000));
@@ -238,6 +242,38 @@ static void alarm_sound_task(void *arg)
     }
 
     app->alarm_sound_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void timer_sound_task(void *arg)
+{
+    alarm_runtime_context_t *ctx = (alarm_runtime_context_t *)arg;
+    app_context_t *app = (ctx != NULL) ? ctx->app : NULL;
+
+    if (app == NULL)
+    {
+        vTaskDelete(NULL);
+        return;
+    }
+
+    while (app->timer_alert_active)
+    {
+        audio_play_beep_ms(120);
+        if (!app->timer_alert_active)
+        {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(180));
+
+        audio_play_beep_ms(120);
+        if (!app->timer_alert_active)
+        {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(900));
+    }
+
+    app->timer_alert_task_handle = NULL;
     vTaskDelete(NULL);
 }
 
@@ -308,6 +344,42 @@ void alarm_runtime_stop(const alarm_runtime_context_t *ctx)
 
     ui_refresh();
     ESP_LOGI(alarm_runtime_log_tag(ctx), "鬧鐘已停止");
+}
+
+void alarm_runtime_start_timer_alert(const alarm_runtime_context_t *ctx)
+{
+    app_context_t *app;
+
+    if (!alarm_runtime_context_valid(ctx))
+    {
+        return;
+    }
+
+    app = ctx->app;
+    if (app->alarm_ringing || app->timer_alert_active)
+    {
+        return;
+    }
+
+    app->timer_alert_active = true;
+
+    if (app->timer_alert_task_handle == NULL)
+    {
+        xTaskCreatePinnedToCore(timer_sound_task, "timer_sound", 4096, (void *)ctx, 4, &app->timer_alert_task_handle, 1);
+    }
+}
+
+void alarm_runtime_stop_timer_alert(const alarm_runtime_context_t *ctx)
+{
+    app_context_t *app;
+
+    if (!alarm_runtime_context_valid(ctx))
+    {
+        return;
+    }
+
+    app = ctx->app;
+    app->timer_alert_active = false;
 }
 
 void alarm_runtime_check_trigger(const alarm_runtime_context_t *ctx)

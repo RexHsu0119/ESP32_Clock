@@ -17,6 +17,11 @@ extern "C"
         bool alarm_setting_mode;
         bool alarm_list_mode;
         bool alarm_edit_mode;
+        bool timer_mode;
+        bool timer_set_mode;
+        bool timer_running;
+        bool timer_paused;
+        bool timer_done;
         bool time_setting_mode;
         bool calendar_active;
         bool calendar_adjust_year_selected;
@@ -39,6 +44,15 @@ extern "C"
         void (*menu_close)(void);
         void (*menu_open)(void);
 
+        void (*timer_adjust)(int delta);
+        void (*timer_advance_field)(void);
+        void (*timer_clear)(void);
+        void (*timer_start_or_exit)(void);
+        void (*timer_pause_resume)(void);
+        void (*timer_cancel)(void);
+        void (*timer_exit)(void);
+        void (*timer_ack_done)(void);
+
         void (*alarm_move_selection)(int delta);
         void (*alarm_toggle_selected_enabled)(void);
         void (*alarm_enter_selected_edit)(void);
@@ -54,6 +68,7 @@ extern "C"
 
         void (*enter_time_setting_mode)(void);
         void (*enter_alarm_setting_mode)(void);
+        void (*enter_timer_mode)(void);
 
         void (*calendar_toggle_adjust_field)(void);
         void (*calendar_change_year)(int delta);

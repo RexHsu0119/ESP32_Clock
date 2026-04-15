@@ -118,6 +118,101 @@ void input_handler_handle_button(const input_handler_state_t *state,
         return;
     }
 
+    if (state->timer_mode)
+    {
+        if (event_type == BUTTON_SHORT_PRESS || event_type == BUTTON_REPEAT_PRESS)
+        {
+            if (state->timer_done)
+            {
+                if (ops->timer_ack_done != NULL)
+                {
+                    ops->timer_ack_done();
+                }
+                return;
+            }
+
+            if (state->timer_set_mode)
+            {
+                switch (button_id)
+                {
+                case BUTTON_UP:
+                    if (ops->timer_adjust != NULL)
+                    {
+                        ops->timer_adjust(+1);
+                    }
+                    break;
+                case BUTTON_DOWN:
+                    if (ops->timer_adjust != NULL)
+                    {
+                        ops->timer_adjust(-1);
+                    }
+                    break;
+                case BUTTON_CENTER:
+                    if (event_type == BUTTON_SHORT_PRESS && ops->timer_advance_field != NULL)
+                    {
+                        ops->timer_advance_field();
+                    }
+                    break;
+                case BUTTON_COMBO_UP_DOWN:
+                    if (event_type == BUTTON_SHORT_PRESS && ops->timer_clear != NULL)
+                    {
+                        ops->timer_clear();
+                    }
+                    break;
+                default:
+                    break;
+                }
+                return;
+            }
+
+            if (state->timer_running || state->timer_paused)
+            {
+                switch (button_id)
+                {
+                case BUTTON_CENTER:
+                    if (event_type == BUTTON_SHORT_PRESS && ops->timer_pause_resume != NULL)
+                    {
+                        ops->timer_pause_resume();
+                    }
+                    break;
+                case BUTTON_COMBO_UP_DOWN:
+                    if (event_type == BUTTON_SHORT_PRESS && ops->timer_cancel != NULL)
+                    {
+                        ops->timer_cancel();
+                    }
+                    break;
+                default:
+                    break;
+                }
+                return;
+            }
+        }
+        else if (event_type == BUTTON_LONG_PRESS && button_id == BUTTON_CENTER)
+        {
+            if (state->timer_set_mode)
+            {
+                if (ops->timer_start_or_exit != NULL)
+                {
+                    ops->timer_start_or_exit();
+                }
+            }
+            else if (state->timer_running || state->timer_paused)
+            {
+                if (ops->timer_exit != NULL)
+                {
+                    ops->timer_exit();
+                }
+            }
+            else if (state->timer_done && ops->timer_ack_done != NULL)
+            {
+                ops->timer_ack_done();
+            }
+            return;
+        }
+
+        return;
+    }
+
     if (event_type == BUTTON_SHORT_PRESS || event_type == BUTTON_REPEAT_PRESS)
     {
         if (state->alarm_setting_mode)

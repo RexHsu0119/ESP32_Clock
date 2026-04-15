@@ -25,6 +25,7 @@ extern "C"
         calendar_adjust_field_t *calendar_adjust_field;
         int *calendar_year;
         int *calendar_month;
+        void (*enter_timer_mode)(void);
         void (*enter_time_setting_mode)(void);
         void (*enter_alarm_setting_mode)(void);
         void (*start_manual_resync)(void);

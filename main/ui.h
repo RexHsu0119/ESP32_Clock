@@ -41,6 +41,15 @@ extern "C"
                                         int hour,
                                         int minute);
 
+    void ui_create_timer_overlay(lv_obj_t *scr);
+    void ui_update_timer_overlay_locked(bool timer_mode,
+                                        int timer_state,
+                                        int timer_field,
+                                        int timer_hours,
+                                        int timer_minutes,
+                                        int timer_seconds,
+                                        int remaining_seconds);
+
     void ui_create_menu_overlay(lv_obj_t *scr);
     void ui_update_menu_overlay_locked(bool menu_open,
                                        bool app_clock_mode,

@@ -36,6 +36,7 @@
 #include "menu_logic.h"
 #include "network_sync.h"
 #include "settings_logic.h"
+#include "timer_logic.h"
 #include "ui.h"
 #include "ui_clock.h"
 #include "lvgl.h"
@@ -73,6 +74,7 @@ static void menu_close(void);
 static void menu_move(int delta);
 static void menu_execute_selected(void);
 static void start_manual_resync(void);
+static void enter_timer_mode(void);
 static void enter_time_setting_mode(void);
 static void enter_alarm_setting_mode(void);
 static void exit_alarm_setting_mode(void);
@@ -101,6 +103,16 @@ static void ih_menu_execute(void);
 static void ih_menu_close(void);
 static void ih_menu_open(void);
 
+static void ih_timer_adjust(int delta);
+static void ih_timer_advance_field(void);
+static void ih_timer_clear(void);
+static void ih_timer_start_or_exit(void);
+static void ih_timer_pause_resume(void);
+static void ih_timer_cancel(void);
+static void ih_timer_exit(void);
+static void ih_timer_ack_done(void);
+static void start_timer_done_alert(void);
+static void stop_timer_done_alert(void);
 static void ih_alarm_move_selection(int delta);
 static void ih_alarm_toggle_selected_enabled(void);
 static void ih_alarm_enter_selected_edit(void);
@@ -158,6 +170,22 @@ static settings_logic_context_t g_settings_logic = {
     .alarm_set_field = &g_app.alarm_set_field,
 };
 
+static timer_logic_context_t g_timer_logic = {
+    .log_tag = "MAIN",
+    .timer_mode = &g_app.timer_mode,
+    .timer_state = &g_app.timer_state,
+    .timer_set_field = &g_app.timer_set_field,
+    .timer_hours = &g_app.timer_hours,
+    .timer_minutes = &g_app.timer_minutes,
+    .timer_seconds = &g_app.timer_seconds,
+    .timer_remaining_seconds = &g_app.timer_remaining_seconds,
+    .timer_end_time_us = &g_app.timer_end_time_us,
+    .current_panel = &g_app.current_panel,
+    .last_clock_panel_before_overlay = &g_app.last_clock_panel_before_overlay,
+    .start_done_alert = start_timer_done_alert,
+    .stop_done_alert = stop_timer_done_alert,
+};
+
 static menu_logic_context_t g_menu_logic = {
     .menu_open = &g_app.menu_open,
     .menu_selected = &g_app.menu_selected,
@@ -173,6 +201,7 @@ static menu_logic_context_t g_menu_logic = {
     .calendar_adjust_field = &g_app.calendar_adjust_field,
     .calendar_year = &g_app.calendar_year,
     .calendar_month = &g_app.calendar_month,
+    .enter_timer_mode = enter_timer_mode,
     .enter_time_setting_mode = enter_time_setting_mode,
     .enter_alarm_setting_mode = enter_alarm_setting_mode,
     .start_manual_resync = start_manual_resync,
@@ -250,6 +279,14 @@ static alarm_runtime_context_t g_alarm_runtime = {
 #define g_alarm_flash_on g_app.alarm_flash_on
 #define g_alarm_last_flash_us g_app.alarm_last_flash_us
 #define g_alarm_sound_task_handle g_app.alarm_sound_task_handle
+#define g_timer_mode g_app.timer_mode
+#define g_timer_state g_app.timer_state
+#define g_timer_set_field g_app.timer_set_field
+#define g_timer_hours g_app.timer_hours
+#define g_timer_minutes g_app.timer_minutes
+#define g_timer_seconds g_app.timer_seconds
+#define g_timer_remaining_seconds g_app.timer_remaining_seconds
+#define g_timer_alert_active g_app.timer_alert_active
 #define g_time_base_valid g_app.time_base_valid
 #define g_force_unknown_during_sync g_app.force_unknown_during_sync
 #define s_rtc_time_valid g_rtc_time_valid
@@ -277,6 +314,64 @@ static void lvgl_tick_cb(void *arg)
 {
     (void)arg;
     lv_tick_inc(2);
+}
+
+/* =========================
+ * Timer
+ * ========================= */
+static void enter_timer_mode(void)
+{
+    timer_logic_enter_mode(&g_timer_logic);
+}
+
+static void adjust_timer_field(int delta)
+{
+    timer_logic_adjust_field(&g_timer_logic, delta);
+}
+
+static void advance_timer_field(void)
+{
+    timer_logic_advance_field(&g_timer_logic);
+}
+
+static void clear_timer(void)
+{
+    timer_logic_clear(&g_timer_logic);
+}
+
+static void start_timer_or_exit(void)
+{
+    timer_logic_start_or_exit(&g_timer_logic);
+}
+
+static void pause_resume_timer(void)
+{
+    timer_logic_pause_resume(&g_timer_logic);
+}
+
+static void cancel_timer(void)
+{
+    timer_logic_cancel(&g_timer_logic);
+}
+
+static void exit_timer_mode(void)
+{
+    timer_logic_exit_mode(&g_timer_logic);
+}
+
+static void ack_timer_done(void)
+{
+    timer_logic_ack_done(&g_timer_logic);
+}
+
+static void start_timer_done_alert(void)
+{
+    alarm_runtime_start_timer_alert(&g_alarm_runtime);
+}
+
+static void stop_timer_done_alert(void)
+{
+    alarm_runtime_stop_timer_alert(&g_alarm_runtime);
 }
 
 /* =========================
@@ -647,6 +742,14 @@ static void update_ui(void)
                                            g_alarm_edit.hour,
                                            g_alarm_edit.minute);
 
+            ui_update_timer_overlay_locked(g_timer_mode,
+                                           (int)g_timer_state,
+                                           (int)g_timer_set_field,
+                                           g_timer_hours,
+                                           g_timer_minutes,
+                                           g_timer_seconds,
+                                           g_timer_remaining_seconds);
+
             ui_update_menu_overlay_locked(g_menu_open,
                                           (g_app_mode == APP_MODE_CLOCK),
                                           (int)g_menu_selected,
@@ -739,6 +842,14 @@ static void update_ui(void)
                                        g_alarm_edit.hour,
                                        g_alarm_edit.minute);
 
+        ui_update_timer_overlay_locked(g_timer_mode,
+                                       (int)g_timer_state,
+                                       (int)g_timer_set_field,
+                                       g_timer_hours,
+                                       g_timer_minutes,
+                                       g_timer_seconds,
+                                       g_timer_remaining_seconds);
+
         ui_update_menu_overlay_locked(g_menu_open,
                                       (g_app_mode == APP_MODE_CLOCK),
                                       (int)g_menu_selected,
@@ -776,8 +887,10 @@ static void lvgl_task(void *arg)
         alarm_check_elapsed_ms += 10;
 
         alarm_runtime_update_flash_effect(&g_alarm_runtime);
+        timer_logic_update(&g_timer_logic);
 
-        uint32_t target_period = (is_setting_time || g_alarm_setting_mode)
+        uint32_t target_period = (is_setting_time || g_alarm_setting_mode ||
+                                  (g_timer_mode && (g_timer_state == TIMER_STATE_SET || g_timer_state == TIMER_STATE_DONE)))
                                      ? UI_UPDATE_PERIOD_SETTING_MS
                                      : UI_UPDATE_PERIOD_NORMAL_MS;
 
@@ -807,6 +920,11 @@ static input_handler_state_t build_input_handler_state(void)
         .alarm_setting_mode = g_alarm_setting_mode,
         .alarm_list_mode = (g_alarm_ui_mode == ALARM_UI_LIST),
         .alarm_edit_mode = (g_alarm_ui_mode == ALARM_UI_EDIT),
+        .timer_mode = g_timer_mode,
+        .timer_set_mode = (g_timer_state == TIMER_STATE_SET || g_timer_state == TIMER_STATE_IDLE),
+        .timer_running = (g_timer_state == TIMER_STATE_RUNNING),
+        .timer_paused = (g_timer_state == TIMER_STATE_PAUSED),
+        .timer_done = (g_timer_state == TIMER_STATE_DONE),
         .time_setting_mode = is_setting_time,
         .calendar_active = (current_panel == PANEL_CALENDAR),
         .calendar_adjust_year_selected = (g_calendar_adjust_field == CALENDAR_ADJUST_YEAR),
@@ -866,6 +984,46 @@ static void ih_menu_close(void)
 static void ih_menu_open(void)
 {
     menu_open();
+}
+
+static void ih_timer_adjust(int delta)
+{
+    adjust_timer_field(delta);
+}
+
+static void ih_timer_advance_field(void)
+{
+    advance_timer_field();
+}
+
+static void ih_timer_clear(void)
+{
+    clear_timer();
+}
+
+static void ih_timer_start_or_exit(void)
+{
+    start_timer_or_exit();
+}
+
+static void ih_timer_pause_resume(void)
+{
+    pause_resume_timer();
+}
+
+static void ih_timer_cancel(void)
+{
+    cancel_timer();
+}
+
+static void ih_timer_exit(void)
+{
+    exit_timer_mode();
+}
+
+static void ih_timer_ack_done(void)
+{
+    ack_timer_done();
 }
 
 static void ih_alarm_move_selection(int delta)
@@ -941,6 +1099,12 @@ static void ih_enter_alarm_setting_mode(void)
     ui_refresh();
 }
 
+static void ih_enter_timer_mode(void)
+{
+    enter_timer_mode();
+    ui_refresh();
+}
+
 static void ih_calendar_toggle_adjust_field(void)
 {
     g_calendar_adjust_field = (g_calendar_adjust_field == CALENDAR_ADJUST_YEAR)
@@ -1008,6 +1172,15 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
         .menu_close = ih_menu_close,
         .menu_open = ih_menu_open,
 
+        .timer_adjust = ih_timer_adjust,
+        .timer_advance_field = ih_timer_advance_field,
+        .timer_clear = ih_timer_clear,
+        .timer_start_or_exit = ih_timer_start_or_exit,
+        .timer_pause_resume = ih_timer_pause_resume,
+        .timer_cancel = ih_timer_cancel,
+        .timer_exit = ih_timer_exit,
+        .timer_ack_done = ih_timer_ack_done,
+
         .alarm_move_selection = ih_alarm_move_selection,
         .alarm_toggle_selected_enabled = ih_alarm_toggle_selected_enabled,
         .alarm_enter_selected_edit = ih_alarm_enter_selected_edit,
@@ -1023,6 +1196,7 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
 
         .enter_time_setting_mode = ih_enter_time_setting_mode,
         .enter_alarm_setting_mode = ih_enter_alarm_setting_mode,
+        .enter_timer_mode = ih_enter_timer_mode,
 
         .calendar_toggle_adjust_field = ih_calendar_toggle_adjust_field,
         .calendar_change_year = ih_calendar_change_year,
