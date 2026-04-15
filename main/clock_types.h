@@ -68,8 +68,16 @@ typedef enum
 
 typedef enum
 {
+    STOPWATCH_STATE_IDLE = 0,
+    STOPWATCH_STATE_RUNNING,
+    STOPWATCH_STATE_PAUSED,
+} stopwatch_state_t;
+
+typedef enum
+{
     MENU_ITEM_ALARM = 0,
     MENU_ITEM_TIMER,
+    MENU_ITEM_STOPWATCH,
     MENU_ITEM_SET_TIME,
     MENU_ITEM_CALENDAR,
     MENU_ITEM_WIFI_SETUP,

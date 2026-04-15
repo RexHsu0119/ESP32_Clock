@@ -50,6 +50,11 @@ extern "C"
                                         int timer_seconds,
                                         int remaining_seconds);
 
+    void ui_create_stopwatch_overlay(lv_obj_t *scr);
+    void ui_update_stopwatch_overlay_locked(bool stopwatch_mode,
+                                            int stopwatch_state,
+                                            int64_t elapsed_ms);
+
     void ui_create_menu_overlay(lv_obj_t *scr);
     void ui_update_menu_overlay_locked(bool menu_open,
                                        bool app_clock_mode,

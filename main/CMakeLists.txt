@@ -11,6 +11,7 @@ idf_component_register(
         "menu_logic.c"
         "network_sync.c"
         "settings_logic.c"
+        "stopwatch_logic.c"
         "timer_logic.c"
         "ui.c"
         "ui_clock.c"

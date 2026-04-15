@@ -36,6 +36,7 @@
 #include "menu_logic.h"
 #include "network_sync.h"
 #include "settings_logic.h"
+#include "stopwatch_logic.h"
 #include "timer_logic.h"
 #include "ui.h"
 #include "ui_clock.h"
@@ -75,6 +76,7 @@ static void menu_move(int delta);
 static void menu_execute_selected(void);
 static void start_manual_resync(void);
 static void enter_timer_mode(void);
+static void enter_stopwatch_mode(void);
 static void enter_time_setting_mode(void);
 static void enter_alarm_setting_mode(void);
 static void exit_alarm_setting_mode(void);
@@ -111,6 +113,9 @@ static void ih_timer_pause_resume(void);
 static void ih_timer_cancel(void);
 static void ih_timer_exit(void);
 static void ih_timer_ack_done(void);
+static void ih_stopwatch_toggle_start_pause(void);
+static void ih_stopwatch_reset(void);
+static void ih_stopwatch_exit(void);
 static void start_timer_done_alert(void);
 static void stop_timer_done_alert(void);
 static void ih_alarm_move_selection(int delta);
@@ -186,6 +191,16 @@ static timer_logic_context_t g_timer_logic = {
     .stop_done_alert = stop_timer_done_alert,
 };
 
+static stopwatch_logic_context_t g_stopwatch_logic = {
+    .log_tag = "MAIN",
+    .stopwatch_mode = &g_app.stopwatch_mode,
+    .stopwatch_state = &g_app.stopwatch_state,
+    .stopwatch_elapsed_ms = &g_app.stopwatch_elapsed_ms,
+    .stopwatch_start_time_us = &g_app.stopwatch_start_time_us,
+    .current_panel = &g_app.current_panel,
+    .last_clock_panel_before_overlay = &g_app.last_clock_panel_before_overlay,
+};
+
 static menu_logic_context_t g_menu_logic = {
     .menu_open = &g_app.menu_open,
     .menu_selected = &g_app.menu_selected,
@@ -202,6 +217,7 @@ static menu_logic_context_t g_menu_logic = {
     .calendar_year = &g_app.calendar_year,
     .calendar_month = &g_app.calendar_month,
     .enter_timer_mode = enter_timer_mode,
+    .enter_stopwatch_mode = enter_stopwatch_mode,
     .enter_time_setting_mode = enter_time_setting_mode,
     .enter_alarm_setting_mode = enter_alarm_setting_mode,
     .start_manual_resync = start_manual_resync,
@@ -287,6 +303,9 @@ static alarm_runtime_context_t g_alarm_runtime = {
 #define g_timer_seconds g_app.timer_seconds
 #define g_timer_remaining_seconds g_app.timer_remaining_seconds
 #define g_timer_alert_active g_app.timer_alert_active
+#define g_stopwatch_mode g_app.stopwatch_mode
+#define g_stopwatch_state g_app.stopwatch_state
+#define g_stopwatch_elapsed_ms g_app.stopwatch_elapsed_ms
 #define g_time_base_valid g_app.time_base_valid
 #define g_force_unknown_during_sync g_app.force_unknown_during_sync
 #define s_rtc_time_valid g_rtc_time_valid
@@ -322,6 +341,11 @@ static void lvgl_tick_cb(void *arg)
 static void enter_timer_mode(void)
 {
     timer_logic_enter_mode(&g_timer_logic);
+}
+
+static void enter_stopwatch_mode(void)
+{
+    stopwatch_logic_enter_mode(&g_stopwatch_logic);
 }
 
 static void adjust_timer_field(int delta)
@@ -372,6 +396,24 @@ static void start_timer_done_alert(void)
 static void stop_timer_done_alert(void)
 {
     alarm_runtime_stop_timer_alert(&g_alarm_runtime);
+}
+
+/* =========================
+ * Stopwatch
+ * ========================= */
+static void toggle_stopwatch_start_pause(void)
+{
+    stopwatch_logic_toggle_start_pause(&g_stopwatch_logic);
+}
+
+static void reset_stopwatch(void)
+{
+    stopwatch_logic_reset(&g_stopwatch_logic);
+}
+
+static void exit_stopwatch_mode(void)
+{
+    stopwatch_logic_exit_mode(&g_stopwatch_logic);
 }
 
 /* =========================
@@ -750,6 +792,10 @@ static void update_ui(void)
                                            g_timer_seconds,
                                            g_timer_remaining_seconds);
 
+            ui_update_stopwatch_overlay_locked(g_stopwatch_mode,
+                                               (int)g_stopwatch_state,
+                                               g_stopwatch_elapsed_ms);
+
             ui_update_menu_overlay_locked(g_menu_open,
                                           (g_app_mode == APP_MODE_CLOCK),
                                           (int)g_menu_selected,
@@ -850,6 +896,10 @@ static void update_ui(void)
                                        g_timer_seconds,
                                        g_timer_remaining_seconds);
 
+        ui_update_stopwatch_overlay_locked(g_stopwatch_mode,
+                                           (int)g_stopwatch_state,
+                                           g_stopwatch_elapsed_ms);
+
         ui_update_menu_overlay_locked(g_menu_open,
                                       (g_app_mode == APP_MODE_CLOCK),
                                       (int)g_menu_selected,
@@ -888,11 +938,17 @@ static void lvgl_task(void *arg)
 
         alarm_runtime_update_flash_effect(&g_alarm_runtime);
         timer_logic_update(&g_timer_logic);
+        stopwatch_logic_update(&g_stopwatch_logic);
 
         uint32_t target_period = (is_setting_time || g_alarm_setting_mode ||
                                   (g_timer_mode && (g_timer_state == TIMER_STATE_SET || g_timer_state == TIMER_STATE_DONE)))
                                      ? UI_UPDATE_PERIOD_SETTING_MS
                                      : UI_UPDATE_PERIOD_NORMAL_MS;
+
+        if (g_stopwatch_mode && g_stopwatch_state == STOPWATCH_STATE_RUNNING)
+        {
+            target_period = 10;
+        }
 
         if (ui_elapsed_ms >= target_period)
         {
@@ -925,6 +981,9 @@ static input_handler_state_t build_input_handler_state(void)
         .timer_running = (g_timer_state == TIMER_STATE_RUNNING),
         .timer_paused = (g_timer_state == TIMER_STATE_PAUSED),
         .timer_done = (g_timer_state == TIMER_STATE_DONE),
+        .stopwatch_mode = g_stopwatch_mode,
+        .stopwatch_running = (g_stopwatch_state == STOPWATCH_STATE_RUNNING),
+        .stopwatch_paused = (g_stopwatch_state == STOPWATCH_STATE_PAUSED),
         .time_setting_mode = is_setting_time,
         .calendar_active = (current_panel == PANEL_CALENDAR),
         .calendar_adjust_year_selected = (g_calendar_adjust_field == CALENDAR_ADJUST_YEAR),
@@ -1024,6 +1083,21 @@ static void ih_timer_exit(void)
 static void ih_timer_ack_done(void)
 {
     ack_timer_done();
+}
+
+static void ih_stopwatch_toggle_start_pause(void)
+{
+    toggle_stopwatch_start_pause();
+}
+
+static void ih_stopwatch_reset(void)
+{
+    reset_stopwatch();
+}
+
+static void ih_stopwatch_exit(void)
+{
+    exit_stopwatch_mode();
 }
 
 static void ih_alarm_move_selection(int delta)
@@ -1180,6 +1254,10 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
         .timer_cancel = ih_timer_cancel,
         .timer_exit = ih_timer_exit,
         .timer_ack_done = ih_timer_ack_done,
+
+        .stopwatch_toggle_start_pause = ih_stopwatch_toggle_start_pause,
+        .stopwatch_reset = ih_stopwatch_reset,
+        .stopwatch_exit = ih_stopwatch_exit,
 
         .alarm_move_selection = ih_alarm_move_selection,
         .alarm_toggle_selected_enabled = ih_alarm_toggle_selected_enabled,

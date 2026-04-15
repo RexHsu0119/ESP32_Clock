@@ -27,6 +27,7 @@ const char *menu_logic_item_text(menu_item_t item)
     static const char *texts[MENU_ITEM_COUNT] = {
         "Alarm",
         "Countdown Timer",
+        "Stopwatch",
         "Set Time",
         "Calendar",
         "Wi-Fi Setup",
@@ -196,6 +197,13 @@ void menu_logic_execute_selected(menu_logic_context_t *ctx)
         if (ctx->enter_timer_mode != NULL)
         {
             ctx->enter_timer_mode();
+        }
+        break;
+
+    case MENU_ITEM_STOPWATCH:
+        if (ctx->enter_stopwatch_mode != NULL)
+        {
+            ctx->enter_stopwatch_mode();
         }
         break;
 

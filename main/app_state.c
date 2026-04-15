@@ -51,6 +51,11 @@ app_context_t g_app = {
     .timer_alert_active = false,
     .timer_alert_task_handle = NULL,
 
+    .stopwatch_mode = false,
+    .stopwatch_state = STOPWATCH_STATE_IDLE,
+    .stopwatch_elapsed_ms = 0,
+    .stopwatch_start_time_us = 0,
+
     .alarm_last_trigger_year = {-1, -1, -1},
     .alarm_last_trigger_yday = {-1, -1, -1},
     .alarm_last_trigger_hour = {-1, -1, -1},

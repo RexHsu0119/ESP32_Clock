@@ -213,6 +213,42 @@ void input_handler_handle_button(const input_handler_state_t *state,
         return;
     }
 
+    if (state->stopwatch_mode)
+    {
+        if (event_type == BUTTON_SHORT_PRESS || event_type == BUTTON_REPEAT_PRESS)
+        {
+            switch (button_id)
+            {
+            case BUTTON_CENTER:
+                if (event_type == BUTTON_SHORT_PRESS && ops->stopwatch_toggle_start_pause != NULL)
+                {
+                    ops->stopwatch_toggle_start_pause();
+                }
+                break;
+            case BUTTON_COMBO_UP_DOWN:
+                if (event_type == BUTTON_SHORT_PRESS &&
+                    !state->stopwatch_running &&
+                    ops->stopwatch_reset != NULL)
+                {
+                    ops->stopwatch_reset();
+                }
+                break;
+            default:
+                break;
+            }
+        }
+        else if (event_type == BUTTON_LONG_PRESS && button_id == BUTTON_CENTER)
+        {
+            if (ops->stopwatch_exit != NULL)
+            {
+                ops->stopwatch_exit();
+            }
+            return;
+        }
+
+        return;
+    }
+
     if (event_type == BUTTON_SHORT_PRESS || event_type == BUTTON_REPEAT_PRESS)
     {
         if (state->alarm_setting_mode)

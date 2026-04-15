@@ -47,6 +47,11 @@ extern "C"
         volatile bool timer_alert_active;
         TaskHandle_t timer_alert_task_handle;
 
+        bool stopwatch_mode;
+        stopwatch_state_t stopwatch_state;
+        int64_t stopwatch_elapsed_ms;
+        int64_t stopwatch_start_time_us;
+
         int alarm_last_trigger_year[ALARM_SLOT_COUNT];
         int alarm_last_trigger_yday[ALARM_SLOT_COUNT];
         int alarm_last_trigger_hour[ALARM_SLOT_COUNT];
