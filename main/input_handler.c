@@ -122,6 +122,44 @@ void input_handler_handle_button(const input_handler_state_t *state,
     {
         if (state->alarm_setting_mode)
         {
+            if (state->alarm_list_mode)
+            {
+                switch (button_id)
+                {
+                case BUTTON_UP:
+                    if (ops->alarm_move_selection != NULL)
+                    {
+                        ops->alarm_move_selection(-1);
+                    }
+                    break;
+
+                case BUTTON_DOWN:
+                    if (ops->alarm_move_selection != NULL)
+                    {
+                        ops->alarm_move_selection(+1);
+                    }
+                    break;
+
+                case BUTTON_CENTER:
+                    if (event_type == BUTTON_SHORT_PRESS && ops->alarm_enter_selected_edit != NULL)
+                    {
+                        ops->alarm_enter_selected_edit();
+                    }
+                    break;
+
+                case BUTTON_COMBO_UP_DOWN:
+                    if (event_type == BUTTON_SHORT_PRESS && ops->alarm_toggle_selected_enabled != NULL)
+                    {
+                        ops->alarm_toggle_selected_enabled();
+                    }
+                    break;
+
+                default:
+                    break;
+                }
+                return;
+            }
+
             switch (button_id)
             {
             case BUTTON_UP:
@@ -142,6 +180,13 @@ void input_handler_handle_button(const input_handler_state_t *state,
                 if (event_type == BUTTON_SHORT_PRESS && ops->advance_alarm_field != NULL)
                 {
                     ops->advance_alarm_field();
+                }
+                break;
+
+            case BUTTON_COMBO_UP_DOWN:
+                if (event_type == BUTTON_SHORT_PRESS && ops->alarm_cancel_edit != NULL)
+                {
+                    ops->alarm_cancel_edit();
                 }
                 break;
 
@@ -272,9 +317,16 @@ void input_handler_handle_button(const input_handler_state_t *state,
         {
             if (state->alarm_setting_mode)
             {
-                if (ops->save_alarm_setting_and_exit != NULL)
+                if (state->alarm_edit_mode)
                 {
-                    ops->save_alarm_setting_and_exit();
+                    if (ops->save_alarm_setting_and_exit != NULL)
+                    {
+                        ops->save_alarm_setting_and_exit();
+                    }
+                }
+                else if (ops->alarm_exit_setting != NULL)
+                {
+                    ops->alarm_exit_setting();
                 }
             }
             else if (!state->time_setting_mode)

@@ -25,7 +25,7 @@ static bool app_bootstrap_context_valid(const app_bootstrap_context_t *ctx)
 {
     return ctx != NULL &&
            ctx->network_sync != NULL &&
-           ctx->alarm != NULL &&
+           ctx->alarms != NULL &&
            ctx->app_mode != NULL &&
            ctx->boot_hint != NULL &&
            ctx->time_base_valid != NULL &&
@@ -144,7 +144,7 @@ static bool app_bootstrap_init_runtime(app_bootstrap_context_t *ctx,
     ESP_LOGI(app_bootstrap_log_tag(ctx), "初始化 Weather 模組...");
     weather_init();
 
-    alarm_load_from_nvs(ctx->alarm);
+    alarm_load_all_from_nvs(ctx->alarms, ALARM_SLOT_COUNT);
     return true;
 }
 

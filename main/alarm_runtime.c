@@ -164,20 +164,20 @@ static void audio_play_beep_ms(int duration_ms)
     audio_play_silence_ms(20);
 }
 
-static void alarm_mark_triggered(app_context_t *app, const struct tm *t)
+static void alarm_mark_triggered(app_context_t *app, int alarm_index, const struct tm *t)
 {
-    app->alarm_last_trigger_year = t->tm_year;
-    app->alarm_last_trigger_yday = t->tm_yday;
-    app->alarm_last_trigger_hour = t->tm_hour;
-    app->alarm_last_trigger_minute = t->tm_min;
+    app->alarm_last_trigger_year[alarm_index] = t->tm_year;
+    app->alarm_last_trigger_yday[alarm_index] = t->tm_yday;
+    app->alarm_last_trigger_hour[alarm_index] = t->tm_hour;
+    app->alarm_last_trigger_minute[alarm_index] = t->tm_min;
 }
 
-static bool alarm_same_as_last_trigger(const app_context_t *app, const struct tm *t)
+static bool alarm_same_as_last_trigger(const app_context_t *app, int alarm_index, const struct tm *t)
 {
-    return app->alarm_last_trigger_year == t->tm_year &&
-           app->alarm_last_trigger_yday == t->tm_yday &&
-           app->alarm_last_trigger_hour == t->tm_hour &&
-           app->alarm_last_trigger_minute == t->tm_min;
+    return app->alarm_last_trigger_year[alarm_index] == t->tm_year &&
+           app->alarm_last_trigger_yday[alarm_index] == t->tm_yday &&
+           app->alarm_last_trigger_hour[alarm_index] == t->tm_hour &&
+           app->alarm_last_trigger_minute[alarm_index] == t->tm_min;
 }
 
 static void alarm_set_background_locked(lv_color_t color)
@@ -241,7 +241,7 @@ static void alarm_sound_task(void *arg)
     vTaskDelete(NULL);
 }
 
-static void alarm_start(const alarm_runtime_context_t *ctx)
+static void alarm_start(const alarm_runtime_context_t *ctx, int alarm_index)
 {
     app_context_t *app;
 
@@ -260,10 +260,12 @@ static void alarm_start(const alarm_runtime_context_t *ctx)
     app->alarm_flash_on = true;
     app->alarm_last_flash_us = esp_timer_get_time();
 
-    if (app->alarm.repeat == ALARM_REPEAT_ONCE && app->alarm.enabled)
+    if (alarm_index >= 0 && alarm_index < ALARM_SLOT_COUNT &&
+        app->alarms[alarm_index].repeat == ALARM_REPEAT_ONCE &&
+        app->alarms[alarm_index].enabled)
     {
-        app->alarm.enabled = false;
-        alarm_save_to_nvs(&app->alarm);
+        app->alarms[alarm_index].enabled = false;
+        alarm_save_all_to_nvs(app->alarms, ALARM_SLOT_COUNT);
     }
 
     if (ui_lock(pdMS_TO_TICKS(100)))
@@ -277,7 +279,7 @@ static void alarm_start(const alarm_runtime_context_t *ctx)
         xTaskCreatePinnedToCore(alarm_sound_task, "alarm_sound", 4096, (void *)ctx, 4, &app->alarm_sound_task_handle, 1);
     }
 
-    ESP_LOGI(alarm_runtime_log_tag(ctx), "鬧鐘開始響鈴");
+    ESP_LOGI(alarm_runtime_log_tag(ctx), "鬧鐘 A%d 開始響鈴", alarm_index + 1);
 }
 
 void alarm_runtime_stop(const alarm_runtime_context_t *ctx)
@@ -328,10 +330,6 @@ void alarm_runtime_check_trigger(const alarm_runtime_context_t *ctx)
     {
         return;
     }
-    if (!app->alarm.enabled)
-    {
-        return;
-    }
     if (!app->time_base_valid)
     {
         return;
@@ -343,12 +341,21 @@ void alarm_runtime_check_trigger(const alarm_runtime_context_t *ctx)
         return;
     }
 
-    if (t.tm_hour == app->alarm.hour && t.tm_min == app->alarm.minute)
+    for (int i = 0; i < ALARM_SLOT_COUNT; i++)
     {
-        if (!alarm_same_as_last_trigger(app, &t))
+        if (!app->alarms[i].enabled)
         {
-            alarm_mark_triggered(app, &t);
-            alarm_start(ctx);
+            continue;
+        }
+
+        if (t.tm_hour == app->alarms[i].hour && t.tm_min == app->alarms[i].minute)
+        {
+            if (!alarm_same_as_last_trigger(app, i, &t))
+            {
+                alarm_mark_triggered(app, i, &t);
+                alarm_start(ctx, i);
+                break;
+            }
         }
     }
 }

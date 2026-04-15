@@ -2,6 +2,8 @@
 
 #include <stdbool.h>
 
+#define ALARM_SLOT_COUNT 3
+
 typedef enum
 {
     PANEL_DIGITAL = 0,
@@ -37,11 +39,16 @@ typedef enum
 
 typedef enum
 {
-    ALARM_FIELD_ENABLE = 0,
-    ALARM_FIELD_REPEAT,
+    ALARM_FIELD_STATUS = 0,
     ALARM_FIELD_HOUR,
     ALARM_FIELD_MINUTE,
 } alarm_set_field_t;
+
+typedef enum
+{
+    ALARM_UI_LIST = 0,
+    ALARM_UI_EDIT,
+} alarm_ui_mode_t;
 
 typedef enum
 {

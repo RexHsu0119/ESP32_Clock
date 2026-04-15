@@ -20,11 +20,15 @@ static lv_obj_t *s_boot_overlay_line4 = NULL;
 static lv_obj_t *s_alarm_overlay = NULL;
 static lv_obj_t *s_alarm_title_label = NULL;
 static lv_obj_t *s_alarm_help_label = NULL;
+static lv_obj_t *s_alarm_list_row_bg[ALARM_SLOT_COUNT] = {0};
+static lv_obj_t *s_alarm_list_labels[ALARM_SLOT_COUNT] = {0};
+static lv_obj_t *s_alarm_list_time_labels[ALARM_SLOT_COUNT] = {0};
+static lv_obj_t *s_alarm_list_state_labels[ALARM_SLOT_COUNT] = {0};
 static lv_obj_t *s_alarm_hour_label = NULL;
 static lv_obj_t *s_alarm_colon_label = NULL;
 static lv_obj_t *s_alarm_minute_label = NULL;
-static lv_obj_t *s_alarm_enable_label = NULL;
-static lv_obj_t *s_alarm_repeat_label = NULL;
+static lv_obj_t *s_alarm_status_prefix_label = NULL;
+static lv_obj_t *s_alarm_status_label = NULL;
 
 /* menu overlay */
 static lv_obj_t *s_menu_overlay = NULL;
@@ -50,6 +54,16 @@ static lv_obj_t *s_portal_line4_label = NULL;
 static lv_obj_t *s_portal_footer_label = NULL;
 
 #define UI_SETTING_BLINK_PERIOD_US 500000LL
+
+static const char *alarm_list_state_text(const alarm_config_t *alarm)
+{
+    if (alarm == NULL || !alarm->enabled)
+    {
+        return "OFF";
+    }
+
+    return alarm_repeat_text(alarm->repeat);
+}
 
 void ui_init(SemaphoreHandle_t mutex, ui_refresh_cb_t refresh_cb)
 {
@@ -219,15 +233,55 @@ void ui_create_alarm_overlay(lv_obj_t *scr)
     lv_obj_set_style_text_color(s_alarm_title_label, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_font(s_alarm_title_label, &lv_font_montserrat_14, 0);
     lv_label_set_text(s_alarm_title_label, "ALARM SET");
-    lv_obj_set_pos(s_alarm_title_label, 0, 6);
+    lv_obj_set_pos(s_alarm_title_label, 0, 4);
+
+    for (int i = 0; i < ALARM_SLOT_COUNT; i++)
+    {
+        s_alarm_list_row_bg[i] = lv_obj_create(s_alarm_overlay);
+        lv_obj_set_size(s_alarm_list_row_bg[i], DISPLAY_WIDTH - 4, 26);
+        lv_obj_set_pos(s_alarm_list_row_bg[i], 2, 23 + i * 27);
+        lv_obj_set_style_bg_color(s_alarm_list_row_bg[i], lv_color_hex(0x00FFCC), 0);
+        lv_obj_set_style_bg_opa(s_alarm_list_row_bg[i], LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(s_alarm_list_row_bg[i], 0, 0);
+        lv_obj_set_style_radius(s_alarm_list_row_bg[i], 4, 0);
+        lv_obj_set_style_pad_all(s_alarm_list_row_bg[i], 0, 0);
+        lv_obj_clear_flag(s_alarm_list_row_bg[i], LV_OBJ_FLAG_SCROLLABLE);
+
+        s_alarm_list_labels[i] = lv_label_create(s_alarm_overlay);
+        lv_obj_set_width(s_alarm_list_labels[i], 30);
+        lv_label_set_long_mode(s_alarm_list_labels[i], LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_align(s_alarm_list_labels[i], LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_color(s_alarm_list_labels[i], lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(s_alarm_list_labels[i], &lv_font_montserrat_12, 0);
+        lv_label_set_text(s_alarm_list_labels[i], "");
+        lv_obj_set_pos(s_alarm_list_labels[i], 8, 30 + i * 27);
+
+        s_alarm_list_time_labels[i] = lv_label_create(s_alarm_overlay);
+        lv_obj_set_width(s_alarm_list_time_labels[i], 70);
+        lv_label_set_long_mode(s_alarm_list_time_labels[i], LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_align(s_alarm_list_time_labels[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(s_alarm_list_time_labels[i], lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(s_alarm_list_time_labels[i], &lv_font_montserrat_18, 0);
+        lv_label_set_text(s_alarm_list_time_labels[i], "");
+        lv_obj_set_pos(s_alarm_list_time_labels[i], 36, 27 + i * 27);
+
+        s_alarm_list_state_labels[i] = lv_label_create(s_alarm_overlay);
+        lv_obj_set_width(s_alarm_list_state_labels[i], 42);
+        lv_label_set_long_mode(s_alarm_list_state_labels[i], LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_align(s_alarm_list_state_labels[i], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_style_text_color(s_alarm_list_state_labels[i], lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_font(s_alarm_list_state_labels[i], &lv_font_montserrat_12, 0);
+        lv_label_set_text(s_alarm_list_state_labels[i], "");
+        lv_obj_set_pos(s_alarm_list_state_labels[i], 112, 30 + i * 27);
+    }
 
     s_alarm_hour_label = lv_label_create(s_alarm_overlay);
-    lv_obj_set_width(s_alarm_hour_label, 36);
+    lv_obj_set_width(s_alarm_hour_label, 42);
     lv_obj_set_style_text_align(s_alarm_hour_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_alarm_hour_label, lv_color_hex(0xFF0000), 0);
     lv_obj_set_style_text_font(s_alarm_hour_label, &lv_font_montserrat_24, 0);
     lv_label_set_text(s_alarm_hour_label, "07");
-    lv_obj_set_pos(s_alarm_hour_label, 34, 28);
+    lv_obj_set_pos(s_alarm_hour_label, 30, 28);
 
     s_alarm_colon_label = lv_label_create(s_alarm_overlay);
     lv_obj_set_width(s_alarm_colon_label, 16);
@@ -238,40 +292,26 @@ void ui_create_alarm_overlay(lv_obj_t *scr)
     lv_obj_set_pos(s_alarm_colon_label, 72, 28);
 
     s_alarm_minute_label = lv_label_create(s_alarm_overlay);
-    lv_obj_set_width(s_alarm_minute_label, 36);
+    lv_obj_set_width(s_alarm_minute_label, 42);
     lv_obj_set_style_text_align(s_alarm_minute_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_alarm_minute_label, lv_color_hex(0xFF0000), 0);
     lv_obj_set_style_text_font(s_alarm_minute_label, &lv_font_montserrat_24, 0);
     lv_label_set_text(s_alarm_minute_label, "00");
-    lv_obj_set_pos(s_alarm_minute_label, 90, 28);
+    lv_obj_set_pos(s_alarm_minute_label, 88, 28);
 
-    lv_obj_t *alarm_enable_prefix = lv_label_create(s_alarm_overlay);
-    lv_obj_set_style_text_color(alarm_enable_prefix, lv_color_hex(0x00FFCC), 0);
-    lv_obj_set_style_text_font(alarm_enable_prefix, &lv_font_montserrat_14, 0);
-    lv_label_set_text(alarm_enable_prefix, "Enable:");
-    lv_obj_set_pos(alarm_enable_prefix, 28, 64);
+    s_alarm_status_prefix_label = lv_label_create(s_alarm_overlay);
+    lv_obj_set_style_text_color(s_alarm_status_prefix_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(s_alarm_status_prefix_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_alarm_status_prefix_label, "Status:");
+    lv_obj_set_pos(s_alarm_status_prefix_label, 24, 70);
 
-    s_alarm_enable_label = lv_label_create(s_alarm_overlay);
-    lv_obj_set_width(s_alarm_enable_label, 48);
-    lv_obj_set_style_text_align(s_alarm_enable_label, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_set_style_text_color(s_alarm_enable_label, lv_color_hex(0x00FFCC), 0);
-    lv_obj_set_style_text_font(s_alarm_enable_label, &lv_font_montserrat_14, 0);
-    lv_label_set_text(s_alarm_enable_label, "ON");
-    lv_obj_set_pos(s_alarm_enable_label, 92, 64);
-
-    lv_obj_t *alarm_repeat_prefix = lv_label_create(s_alarm_overlay);
-    lv_obj_set_style_text_color(alarm_repeat_prefix, lv_color_hex(0x00FFCC), 0);
-    lv_obj_set_style_text_font(alarm_repeat_prefix, &lv_font_montserrat_14, 0);
-    lv_label_set_text(alarm_repeat_prefix, "Repeat:");
-    lv_obj_set_pos(alarm_repeat_prefix, 28, 82);
-
-    s_alarm_repeat_label = lv_label_create(s_alarm_overlay);
-    lv_obj_set_width(s_alarm_repeat_label, 56);
-    lv_obj_set_style_text_align(s_alarm_repeat_label, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_set_style_text_color(s_alarm_repeat_label, lv_color_hex(0x00FFCC), 0);
-    lv_obj_set_style_text_font(s_alarm_repeat_label, &lv_font_montserrat_14, 0);
-    lv_label_set_text(s_alarm_repeat_label, "DAILY");
-    lv_obj_set_pos(s_alarm_repeat_label, 92, 82);
+    s_alarm_status_label = lv_label_create(s_alarm_overlay);
+    lv_obj_set_width(s_alarm_status_label, 56);
+    lv_obj_set_style_text_align(s_alarm_status_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(s_alarm_status_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(s_alarm_status_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_alarm_status_label, "OFF");
+    lv_obj_set_pos(s_alarm_status_label, 92, 70);
 
     s_alarm_help_label = lv_label_create(s_alarm_overlay);
     lv_obj_set_width(s_alarm_help_label, DISPLAY_WIDTH);
@@ -279,7 +319,7 @@ void ui_create_alarm_overlay(lv_obj_t *scr)
     lv_obj_set_style_text_align(s_alarm_help_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_alarm_help_label, lv_color_hex(0xAAAAAA), 0);
     lv_obj_set_style_text_font(s_alarm_help_label, &lv_font_montserrat_10, 0);
-    lv_label_set_text(s_alarm_help_label, "UP/DOWN adj\nCENTER next/save");
+    lv_label_set_text(s_alarm_help_label, "UP/DN adj\nCENTER next/save");
     lv_obj_set_pos(s_alarm_help_label, 0, 104);
 }
 
@@ -292,6 +332,10 @@ void ui_alarm_overlay_move_foreground(void)
 }
 
 void ui_update_alarm_overlay_locked(bool alarm_setting_mode,
+                                    int alarm_ui_mode,
+                                    int selected_alarm_index,
+                                    const alarm_config_t *alarms,
+                                    int alarm_count,
                                     int alarm_field,
                                     bool enabled,
                                     int repeat,
@@ -309,10 +353,97 @@ void ui_update_alarm_overlay_locked(bool alarm_setting_mode,
         return;
     }
 
+    bool list_mode = (alarm_ui_mode == ALARM_UI_LIST);
+
+    for (int i = 0; i < ALARM_SLOT_COUNT; i++)
+    {
+        if (s_alarm_list_labels[i] == NULL)
+        {
+            continue;
+        }
+
+        if (list_mode && i < alarm_count && alarms != NULL)
+        {
+            bool is_selected = (i == selected_alarm_index);
+            lv_label_set_text_fmt(s_alarm_list_labels[i], "A%d", i + 1);
+            lv_label_set_text_fmt(s_alarm_list_time_labels[i], "%02d:%02d", alarms[i].hour, alarms[i].minute);
+            lv_label_set_text(s_alarm_list_state_labels[i], alarm_list_state_text(&alarms[i]));
+
+            lv_obj_set_style_bg_opa(s_alarm_list_row_bg[i],
+                                    is_selected ? LV_OPA_COVER : LV_OPA_TRANSP,
+                                    0);
+
+            lv_obj_set_style_text_color(s_alarm_list_labels[i],
+                                        is_selected ? lv_color_hex(0x101010) : lv_color_hex(0xFFFFFF),
+                                        0);
+            lv_obj_set_style_text_font(s_alarm_list_labels[i], &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(s_alarm_list_time_labels[i],
+                                        is_selected ? lv_color_hex(0x101010) : lv_color_hex(0xFFFFFF),
+                                        0);
+            lv_obj_set_style_text_font(s_alarm_list_time_labels[i], &lv_font_montserrat_18, 0);
+            lv_obj_set_style_text_color(s_alarm_list_state_labels[i],
+                                        is_selected ? lv_color_hex(0x101010) : lv_color_hex(0xAAAAAA),
+                                        0);
+            lv_obj_set_style_text_font(s_alarm_list_state_labels[i], &lv_font_montserrat_12, 0);
+            lv_obj_clear_flag(s_alarm_list_row_bg[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(s_alarm_list_labels[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(s_alarm_list_time_labels[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(s_alarm_list_state_labels[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_add_flag(s_alarm_list_row_bg[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_alarm_list_labels[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_alarm_list_time_labels[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_alarm_list_state_labels[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    lv_obj_t *edit_objs[] = {
+        s_alarm_hour_label,
+        s_alarm_colon_label,
+        s_alarm_minute_label,
+        s_alarm_status_prefix_label,
+        s_alarm_status_label,
+    };
+
+    for (unsigned int i = 0; i < (sizeof(edit_objs) / sizeof(edit_objs[0])); i++)
+    {
+        if (edit_objs[i] == NULL)
+        {
+            continue;
+        }
+
+        if (list_mode)
+        {
+            lv_obj_add_flag(edit_objs[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_clear_flag(edit_objs[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    if (list_mode)
+    {
+        if (s_alarm_title_label != NULL)
+        {
+            lv_label_set_text(s_alarm_title_label, "ALARM LIST");
+        }
+
+        if (s_alarm_help_label != NULL)
+        {
+            lv_label_set_text(s_alarm_help_label, "UP/DN sel  U+D state\nCENTER edit  LONG back");
+        }
+
+        lv_obj_clear_flag(s_alarm_overlay, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(s_alarm_overlay);
+        return;
+    }
+
     bool blink_on = ((esp_timer_get_time() / UI_SETTING_BLINK_PERIOD_US) % 2) == 0;
 
-    bool show_enable = true;
-    bool show_repeat = true;
+    bool show_status = true;
     bool show_hour = true;
     bool show_minute = true;
 
@@ -321,15 +452,12 @@ void ui_update_alarm_overlay_locked(bool alarm_setting_mode,
         switch (alarm_field)
         {
         case 0:
-            show_enable = false;
+            show_status = false;
             break;
         case 1:
-            show_repeat = false;
-            break;
-        case 2:
             show_hour = false;
             break;
-        case 3:
+        case 2:
             show_minute = false;
             break;
         default:
@@ -339,7 +467,7 @@ void ui_update_alarm_overlay_locked(bool alarm_setting_mode,
 
     if (s_alarm_title_label != NULL)
     {
-        lv_label_set_text(s_alarm_title_label, "ALARM SET");
+        lv_label_set_text_fmt(s_alarm_title_label, "ALARM A%d", selected_alarm_index + 1);
     }
 
     if (s_alarm_hour_label != NULL)
@@ -363,20 +491,17 @@ void ui_update_alarm_overlay_locked(bool alarm_setting_mode,
             lv_label_set_text(s_alarm_minute_label, "  ");
     }
 
-    if (s_alarm_enable_label != NULL)
+    if (s_alarm_status_label != NULL)
     {
-        if (show_enable)
-            lv_label_set_text(s_alarm_enable_label, enabled ? "ON" : "OFF");
+        if (show_status)
+            lv_label_set_text(s_alarm_status_label, enabled ? alarm_repeat_text(repeat) : "OFF");
         else
-            lv_label_set_text(s_alarm_enable_label, "   ");
+            lv_label_set_text(s_alarm_status_label, "     ");
     }
 
-    if (s_alarm_repeat_label != NULL)
+    if (s_alarm_help_label != NULL)
     {
-        if (show_repeat)
-            lv_label_set_text(s_alarm_repeat_label, alarm_repeat_text(repeat));
-        else
-            lv_label_set_text(s_alarm_repeat_label, "     ");
+        lv_label_set_text(s_alarm_help_label, "UP/DN adj  U+D cancel\nCENTER next  LONG save");
     }
 
     lv_obj_clear_flag(s_alarm_overlay, LV_OBJ_FLAG_HIDDEN);

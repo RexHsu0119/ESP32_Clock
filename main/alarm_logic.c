@@ -1,33 +1,24 @@
 #include "alarm_logic.h"
 
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 
-#include "nvs.h"
 #include "esp_log.h"
+#include "nvs.h"
 
 static const char *TAG = "ALARM_LOGIC";
 
-#define ALARM_NAMESPACE "alarm_cfg"
+#define ALARM_NAMESPACE "alarm_cfg_v2"
+#define ALARM_LEGACY_NAMESPACE "alarm_cfg"
+#define ALARM_KEY_VERSION "version"
+#define ALARM_KEY_SLOTS "slots"
 #define ALARM_KEY_ENABLED "enabled"
 #define ALARM_KEY_HOUR "hour"
 #define ALARM_KEY_MINUTE "minute"
 #define ALARM_KEY_REPEAT "repeat"
+#define ALARM_STORAGE_VERSION 2
 
-/*
- * 這個 private struct 是為了對應您目前 main.c 裡的：
- *
- * typedef struct
- * {
- *     bool enabled;
- *     int hour;
- *     int minute;
- *     alarm_repeat_t repeat;
- * } alarm_config_t;
- *
- * 在目前 ESP-IDF / xtensa / gcc 下，enum 預設底層通常為 int，
- * 所以這裡用 int repeat 來對齊現況。
- */
 typedef struct
 {
     bool enabled;
@@ -36,24 +27,139 @@ typedef struct
     int repeat;
 } alarm_config_storage_t;
 
-const char *alarm_repeat_text(int repeat)
+typedef struct
 {
-    /* 依您目前 main.c:
-     * ALARM_REPEAT_ONCE  = 0
-     * ALARM_REPEAT_DAILY = 1
-     */
-    return (repeat == 1) ? "DAILY" : "ONCE";
+    uint8_t version;
+    alarm_config_storage_t alarms[ALARM_SLOT_COUNT];
+} alarm_storage_blob_t;
+
+static void alarm_set_default(alarm_config_t *alarm)
+{
+    if (alarm == NULL)
+    {
+        return;
+    }
+
+    alarm->enabled = false;
+    alarm->hour = 7;
+    alarm->minute = 0;
+    alarm->repeat = ALARM_REPEAT_DAILY;
 }
 
-bool alarm_save_to_nvs(const void *alarm_cfg)
+static void alarm_set_defaults(alarm_config_t *alarms, int count)
 {
-    if (alarm_cfg == NULL)
+    if (alarms == NULL || count <= 0)
     {
-        ESP_LOGE(TAG, "alarm_save_to_nvs: alarm_cfg is NULL");
+        return;
+    }
+
+    for (int i = 0; i < count; i++)
+    {
+        alarm_set_default(&alarms[i]);
+    }
+}
+
+static bool alarm_slot_valid(const alarm_config_storage_t *alarm)
+{
+    return alarm != NULL &&
+           alarm->hour >= 0 && alarm->hour <= 23 &&
+           alarm->minute >= 0 && alarm->minute <= 59 &&
+           (alarm->repeat == ALARM_REPEAT_ONCE || alarm->repeat == ALARM_REPEAT_DAILY);
+}
+
+static void alarm_copy_to_storage(alarm_config_storage_t *dst, const alarm_config_t *src)
+{
+    if (dst == NULL || src == NULL)
+    {
+        return;
+    }
+
+    dst->enabled = src->enabled;
+    dst->hour = src->hour;
+    dst->minute = src->minute;
+    dst->repeat = (int)src->repeat;
+}
+
+static void alarm_copy_from_storage(alarm_config_t *dst, const alarm_config_storage_t *src)
+{
+    if (dst == NULL || src == NULL)
+    {
+        return;
+    }
+
+    if (!alarm_slot_valid(src))
+    {
+        alarm_set_default(dst);
+        return;
+    }
+
+    dst->enabled = src->enabled;
+    dst->hour = src->hour;
+    dst->minute = src->minute;
+    dst->repeat = (alarm_repeat_t)src->repeat;
+}
+
+static bool alarm_load_legacy_first_slot(alarm_config_t *alarm)
+{
+    nvs_handle_t nvs_handle;
+    alarm_config_storage_t storage = {
+        .enabled = false,
+        .hour = 7,
+        .minute = 0,
+        .repeat = ALARM_REPEAT_DAILY,
+    };
+
+    esp_err_t err = nvs_open(ALARM_LEGACY_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK)
+    {
         return false;
     }
 
-    const alarm_config_storage_t *alarm = (const alarm_config_storage_t *)alarm_cfg;
+    uint8_t enabled = storage.enabled ? 1 : 0;
+    int32_t hour = storage.hour;
+    int32_t minute = storage.minute;
+    int32_t repeat = storage.repeat;
+
+    esp_err_t e1 = nvs_get_u8(nvs_handle, ALARM_KEY_ENABLED, &enabled);
+    esp_err_t e2 = nvs_get_i32(nvs_handle, ALARM_KEY_HOUR, &hour);
+    esp_err_t e3 = nvs_get_i32(nvs_handle, ALARM_KEY_MINUTE, &minute);
+    esp_err_t e4 = nvs_get_i32(nvs_handle, ALARM_KEY_REPEAT, &repeat);
+    nvs_close(nvs_handle);
+
+    if (e1 != ESP_OK && e2 != ESP_OK && e3 != ESP_OK && e4 != ESP_OK)
+    {
+        return false;
+    }
+
+    storage.enabled = (enabled == 1);
+    storage.hour = (int)hour;
+    storage.minute = (int)minute;
+    storage.repeat = (int)repeat;
+    alarm_copy_from_storage(alarm, &storage);
+    return true;
+}
+
+const char *alarm_repeat_text(int repeat)
+{
+    return (repeat == ALARM_REPEAT_DAILY) ? "DAILY" : "ONCE";
+}
+
+bool alarm_save_all_to_nvs(const alarm_config_t *alarms, int count)
+{
+    if (alarms == NULL || count <= 0)
+    {
+        ESP_LOGE(TAG, "alarm_save_all_to_nvs: invalid args");
+        return false;
+    }
+
+    alarm_storage_blob_t blob = {0};
+    blob.version = ALARM_STORAGE_VERSION;
+
+    int limit = (count < ALARM_SLOT_COUNT) ? count : ALARM_SLOT_COUNT;
+    for (int i = 0; i < limit; i++)
+    {
+        alarm_copy_to_storage(&blob.alarms[i], &alarms[i]);
+    }
 
     nvs_handle_t nvs_handle;
     esp_err_t err = nvs_open(ALARM_NAMESPACE, NVS_READWRITE, &nvs_handle);
@@ -63,15 +169,15 @@ bool alarm_save_to_nvs(const void *alarm_cfg)
         return false;
     }
 
-    err = nvs_set_u8(nvs_handle, ALARM_KEY_ENABLED, alarm->enabled ? 1 : 0);
+    err = nvs_set_u8(nvs_handle, ALARM_KEY_VERSION, blob.version);
     if (err == ESP_OK)
-        err = nvs_set_i32(nvs_handle, ALARM_KEY_HOUR, alarm->hour);
+    {
+        err = nvs_set_blob(nvs_handle, ALARM_KEY_SLOTS, &blob, sizeof(blob));
+    }
     if (err == ESP_OK)
-        err = nvs_set_i32(nvs_handle, ALARM_KEY_MINUTE, alarm->minute);
-    if (err == ESP_OK)
-        err = nvs_set_i32(nvs_handle, ALARM_KEY_REPEAT, (int32_t)alarm->repeat);
-    if (err == ESP_OK)
+    {
         err = nvs_commit(nvs_handle);
+    }
 
     nvs_close(nvs_handle);
 
@@ -81,63 +187,51 @@ bool alarm_save_to_nvs(const void *alarm_cfg)
         return false;
     }
 
-    ESP_LOGI(TAG, "鬧鐘已儲存: enabled=%d time=%02d:%02d repeat=%s",
-             alarm->enabled,
-             alarm->hour,
-             alarm->minute,
-             alarm_repeat_text(alarm->repeat));
-
+    ESP_LOGI(TAG, "已儲存 %d 組鬧鐘設定", limit);
     return true;
 }
 
-void alarm_load_from_nvs(void *alarm_cfg)
+void alarm_load_all_from_nvs(alarm_config_t *alarms, int count)
 {
-    if (alarm_cfg == NULL)
+    if (alarms == NULL || count <= 0)
     {
-        ESP_LOGE(TAG, "alarm_load_from_nvs: alarm_cfg is NULL");
+        ESP_LOGE(TAG, "alarm_load_all_from_nvs: invalid args");
         return;
     }
 
-    alarm_config_storage_t *alarm = (alarm_config_storage_t *)alarm_cfg;
+    alarm_set_defaults(alarms, count);
 
     nvs_handle_t nvs_handle;
     esp_err_t err = nvs_open(ALARM_NAMESPACE, NVS_READONLY, &nvs_handle);
-    if (err != ESP_OK)
+    if (err == ESP_OK)
     {
-        if (err != ESP_ERR_NVS_NOT_FOUND)
+        size_t required_size = 0;
+        err = nvs_get_blob(nvs_handle, ALARM_KEY_SLOTS, NULL, &required_size);
+        if (err == ESP_OK && required_size == sizeof(alarm_storage_blob_t))
         {
-            ESP_LOGE(TAG, "打開 alarm NVS 失敗: %s", esp_err_to_name(err));
+            alarm_storage_blob_t blob = {0};
+            err = nvs_get_blob(nvs_handle, ALARM_KEY_SLOTS, &blob, &required_size);
+            if (err == ESP_OK && blob.version == ALARM_STORAGE_VERSION)
+            {
+                int limit = (count < ALARM_SLOT_COUNT) ? count : ALARM_SLOT_COUNT;
+                for (int i = 0; i < limit; i++)
+                {
+                    alarm_copy_from_storage(&alarms[i], &blob.alarms[i]);
+                }
+                nvs_close(nvs_handle);
+                ESP_LOGI(TAG, "已載入 %d 組鬧鐘設定", limit);
+                return;
+            }
         }
+        nvs_close(nvs_handle);
+    }
+
+    if (alarm_load_legacy_first_slot(&alarms[0]))
+    {
+        ESP_LOGI(TAG, "已從舊版單組鬧鐘資料遷移到 A1");
+        alarm_save_all_to_nvs(alarms, count);
         return;
     }
 
-    uint8_t enabled = alarm->enabled ? 1 : 0;
-    int32_t hour = alarm->hour;
-    int32_t minute = alarm->minute;
-    int32_t repeat = alarm->repeat;
-
-    esp_err_t e1 = nvs_get_u8(nvs_handle, ALARM_KEY_ENABLED, &enabled);
-    esp_err_t e2 = nvs_get_i32(nvs_handle, ALARM_KEY_HOUR, &hour);
-    esp_err_t e3 = nvs_get_i32(nvs_handle, ALARM_KEY_MINUTE, &minute);
-    esp_err_t e4 = nvs_get_i32(nvs_handle, ALARM_KEY_REPEAT, &repeat);
-
-    nvs_close(nvs_handle);
-
-    if (e1 == ESP_OK)
-        alarm->enabled = (enabled == 1);
-
-    if (e2 == ESP_OK && hour >= 0 && hour <= 23)
-        alarm->hour = (int)hour;
-
-    if (e3 == ESP_OK && minute >= 0 && minute <= 59)
-        alarm->minute = (int)minute;
-
-    if (e4 == ESP_OK && (repeat == 0 || repeat == 1))
-        alarm->repeat = (int)repeat;
-
-    ESP_LOGI(TAG, "載入鬧鐘: enabled=%d time=%02d:%02d repeat=%s",
-             alarm->enabled,
-             alarm->hour,
-             alarm->minute,
-             alarm_repeat_text(alarm->repeat));
+    ESP_LOGI(TAG, "未找到鬧鐘資料，使用預設值");
 }

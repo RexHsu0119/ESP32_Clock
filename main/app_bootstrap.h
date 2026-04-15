@@ -22,7 +22,7 @@ extern "C"
     {
         const char *log_tag;
         network_sync_context_t *network_sync;
-        alarm_config_t *alarm;
+        alarm_config_t *alarms;
         app_mode_t *app_mode;
         boot_hint_t *boot_hint;
         bool *time_base_valid;

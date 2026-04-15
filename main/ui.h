@@ -5,6 +5,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "clock_types.h"
 #include "lvgl.h"
 
 #ifdef __cplusplus
@@ -30,6 +31,10 @@ extern "C"
     void ui_create_alarm_overlay(lv_obj_t *scr);
     void ui_alarm_overlay_move_foreground(void);
     void ui_update_alarm_overlay_locked(bool alarm_setting_mode,
+                                        int alarm_ui_mode,
+                                        int selected_alarm_index,
+                                        const alarm_config_t *alarms,
+                                        int alarm_count,
                                         int alarm_field,
                                         bool enabled,
                                         int repeat,

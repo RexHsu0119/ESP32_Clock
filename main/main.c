@@ -75,6 +75,11 @@ static void menu_execute_selected(void);
 static void start_manual_resync(void);
 static void enter_time_setting_mode(void);
 static void enter_alarm_setting_mode(void);
+static void exit_alarm_setting_mode(void);
+static void move_alarm_selection(int delta);
+static void toggle_selected_alarm_enabled(void);
+static void enter_selected_alarm_edit(void);
+static void cancel_alarm_edit(void);
 
 void button_event_callback(uint8_t button_id, uint8_t event_type);
 
@@ -96,6 +101,11 @@ static void ih_menu_execute(void);
 static void ih_menu_close(void);
 static void ih_menu_open(void);
 
+static void ih_alarm_move_selection(int delta);
+static void ih_alarm_toggle_selected_enabled(void);
+static void ih_alarm_enter_selected_edit(void);
+static void ih_alarm_cancel_edit(void);
+static void ih_alarm_exit_setting(void);
 static void ih_adjust_alarm(int delta);
 static void ih_advance_alarm_field(void);
 static void ih_save_alarm_setting_and_exit(void);
@@ -136,11 +146,15 @@ static settings_logic_context_t g_settings_logic = {
     .time_setting = &g_app.time_setting,
     .current_set_field = &g_app.current_set_field,
     .current_panel = &g_app.current_panel,
+    .last_clock_panel_before_overlay = &g_app.last_clock_panel_before_overlay,
     .time_base_valid = &g_app.time_base_valid,
     .rtc_time_valid = &g_rtc_time_valid,
-    .alarm = &g_app.alarm,
+    .alarms = g_app.alarms,
+    .alarm_count = ALARM_SLOT_COUNT,
     .alarm_edit = &g_app.alarm_edit,
     .alarm_setting_mode = &g_app.alarm_setting_mode,
+    .alarm_ui_mode = &g_app.alarm_ui_mode,
+    .selected_alarm_index = &g_app.selected_alarm_index,
     .alarm_set_field = &g_app.alarm_set_field,
 };
 
@@ -155,7 +169,7 @@ static menu_logic_context_t g_menu_logic = {
     .request_open_wifi_setup = &g_app.request_open_wifi_setup,
     .request_clear_wifi = &g_app.request_clear_wifi,
     .current_panel = &g_app.current_panel,
-    .last_clock_panel_before_calendar = &g_app.last_clock_panel_before_calendar,
+    .last_clock_panel_before_overlay = &g_app.last_clock_panel_before_overlay,
     .calendar_adjust_field = &g_app.calendar_adjust_field,
     .calendar_year = &g_app.calendar_year,
     .calendar_month = &g_app.calendar_month,
@@ -167,7 +181,7 @@ static menu_logic_context_t g_menu_logic = {
 static app_bootstrap_context_t g_app_bootstrap = {
     .log_tag = "MAIN",
     .network_sync = &g_network_sync,
-    .alarm = &g_app.alarm,
+    .alarms = g_app.alarms,
     .app_mode = &g_app.app_mode,
     .boot_hint = &g_app.boot_hint,
     .time_base_valid = &g_app.time_base_valid,
@@ -226,18 +240,16 @@ static alarm_runtime_context_t g_alarm_runtime = {
 #define current_set_field g_app.current_set_field
 #define g_app_mode g_app.app_mode
 #define g_boot_hint g_app.boot_hint
-#define g_alarm g_app.alarm
+#define g_alarms g_app.alarms
 #define g_alarm_edit g_app.alarm_edit
 #define g_alarm_setting_mode g_app.alarm_setting_mode
+#define g_alarm_ui_mode g_app.alarm_ui_mode
+#define g_selected_alarm_index g_app.selected_alarm_index
 #define g_alarm_set_field g_app.alarm_set_field
 #define g_alarm_ringing g_app.alarm_ringing
 #define g_alarm_flash_on g_app.alarm_flash_on
 #define g_alarm_last_flash_us g_app.alarm_last_flash_us
 #define g_alarm_sound_task_handle g_app.alarm_sound_task_handle
-#define g_alarm_last_trigger_year g_app.alarm_last_trigger_year
-#define g_alarm_last_trigger_yday g_app.alarm_last_trigger_yday
-#define g_alarm_last_trigger_hour g_app.alarm_last_trigger_hour
-#define g_alarm_last_trigger_minute g_app.alarm_last_trigger_minute
 #define g_time_base_valid g_app.time_base_valid
 #define g_force_unknown_during_sync g_app.force_unknown_during_sync
 #define s_rtc_time_valid g_rtc_time_valid
@@ -250,7 +262,7 @@ static alarm_runtime_context_t g_alarm_runtime = {
 #define g_menu_top_index g_app.menu_top_index
 #define g_request_open_wifi_setup g_app.request_open_wifi_setup
 #define g_request_clear_wifi g_app.request_clear_wifi
-#define g_last_clock_panel_before_calendar g_app.last_clock_panel_before_calendar
+#define g_last_clock_panel_before_overlay g_app.last_clock_panel_before_overlay
 #define g_confirm_open g_app.confirm_open
 #define g_confirm_action g_app.confirm_action
 #define g_confirm_yes_selected g_app.confirm_yes_selected
@@ -296,6 +308,31 @@ static void advance_setting_field(void)
 static void enter_alarm_setting_mode(void)
 {
     settings_logic_enter_alarm_setting_mode(&g_settings_logic);
+}
+
+static void exit_alarm_setting_mode(void)
+{
+    settings_logic_exit_alarm_setting_mode(&g_settings_logic);
+}
+
+static void move_alarm_selection(int delta)
+{
+    settings_logic_move_alarm_selection(&g_settings_logic, delta);
+}
+
+static void toggle_selected_alarm_enabled(void)
+{
+    settings_logic_toggle_selected_alarm_enabled(&g_settings_logic);
+}
+
+static void enter_selected_alarm_edit(void)
+{
+    settings_logic_enter_selected_alarm_edit(&g_settings_logic);
+}
+
+static void cancel_alarm_edit(void)
+{
+    settings_logic_cancel_alarm_edit(&g_settings_logic);
 }
 
 static void save_alarm_setting_and_exit(void)
@@ -600,6 +637,10 @@ static void update_ui(void)
             ui_update_portal_ui();
 
             ui_update_alarm_overlay_locked(g_alarm_setting_mode,
+                                           (int)g_alarm_ui_mode,
+                                           g_selected_alarm_index,
+                                           g_alarms,
+                                           ALARM_SLOT_COUNT,
                                            (int)g_alarm_set_field,
                                            g_alarm_edit.enabled,
                                            (int)g_alarm_edit.repeat,
@@ -688,6 +729,10 @@ static void update_ui(void)
                            &g_calendar_month);
 
         ui_update_alarm_overlay_locked(g_alarm_setting_mode,
+                                       (int)g_alarm_ui_mode,
+                                       g_selected_alarm_index,
+                                       g_alarms,
+                                       ALARM_SLOT_COUNT,
                                        (int)g_alarm_set_field,
                                        g_alarm_edit.enabled,
                                        (int)g_alarm_edit.repeat,
@@ -760,6 +805,8 @@ static input_handler_state_t build_input_handler_state(void)
         .confirm_open = g_confirm_open,
         .menu_open = g_menu_open,
         .alarm_setting_mode = g_alarm_setting_mode,
+        .alarm_list_mode = (g_alarm_ui_mode == ALARM_UI_LIST),
+        .alarm_edit_mode = (g_alarm_ui_mode == ALARM_UI_EDIT),
         .time_setting_mode = is_setting_time,
         .calendar_active = (current_panel == PANEL_CALENDAR),
         .calendar_adjust_year_selected = (g_calendar_adjust_field == CALENDAR_ADJUST_YEAR),
@@ -819,6 +866,36 @@ static void ih_menu_close(void)
 static void ih_menu_open(void)
 {
     menu_open();
+}
+
+static void ih_alarm_move_selection(int delta)
+{
+    move_alarm_selection(delta);
+    ui_refresh();
+}
+
+static void ih_alarm_toggle_selected_enabled(void)
+{
+    toggle_selected_alarm_enabled();
+    ui_refresh();
+}
+
+static void ih_alarm_enter_selected_edit(void)
+{
+    enter_selected_alarm_edit();
+    ui_refresh();
+}
+
+static void ih_alarm_cancel_edit(void)
+{
+    cancel_alarm_edit();
+    ui_refresh();
+}
+
+static void ih_alarm_exit_setting(void)
+{
+    exit_alarm_setting_mode();
+    ui_refresh();
 }
 
 static void ih_adjust_alarm(int delta)
@@ -896,7 +973,7 @@ static void ih_calendar_reset_to_current_month(void)
 
 static void ih_calendar_return_to_previous_clock(void)
 {
-    current_panel = g_last_clock_panel_before_calendar;
+    current_panel = g_last_clock_panel_before_overlay;
     ui_refresh();
 }
 
@@ -931,6 +1008,11 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
         .menu_close = ih_menu_close,
         .menu_open = ih_menu_open,
 
+        .alarm_move_selection = ih_alarm_move_selection,
+        .alarm_toggle_selected_enabled = ih_alarm_toggle_selected_enabled,
+        .alarm_enter_selected_edit = ih_alarm_enter_selected_edit,
+        .alarm_cancel_edit = ih_alarm_cancel_edit,
+        .alarm_exit_setting = ih_alarm_exit_setting,
         .adjust_alarm = ih_adjust_alarm,
         .advance_alarm_field = ih_advance_alarm_field,
         .save_alarm_setting_and_exit = ih_save_alarm_setting_and_exit,

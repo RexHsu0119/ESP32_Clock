@@ -16,7 +16,7 @@ static bool menu_logic_context_valid(const menu_logic_context_t *ctx)
            ctx->request_open_wifi_setup != NULL &&
            ctx->request_clear_wifi != NULL &&
            ctx->current_panel != NULL &&
-           ctx->last_clock_panel_before_calendar != NULL &&
+           ctx->last_clock_panel_before_overlay != NULL &&
            ctx->calendar_adjust_field != NULL &&
            ctx->calendar_year != NULL &&
            ctx->calendar_month != NULL;
@@ -202,7 +202,7 @@ void menu_logic_execute_selected(menu_logic_context_t *ctx)
     case MENU_ITEM_CALENDAR:
         if (*ctx->current_panel != PANEL_CALENDAR)
         {
-            *ctx->last_clock_panel_before_calendar = *ctx->current_panel;
+            *ctx->last_clock_panel_before_overlay = *ctx->current_panel;
         }
         *ctx->calendar_adjust_field = CALENDAR_ADJUST_MONTH;
         calendar_ensure_initialized(ctx->calendar_year, ctx->calendar_month);

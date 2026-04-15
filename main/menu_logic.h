@@ -21,7 +21,7 @@ extern "C"
         volatile bool *request_open_wifi_setup;
         volatile bool *request_clear_wifi;
         clock_panel_t *current_panel;
-        clock_panel_t *last_clock_panel_before_calendar;
+        clock_panel_t *last_clock_panel_before_overlay;
         calendar_adjust_field_t *calendar_adjust_field;
         int *calendar_year;
         int *calendar_month;

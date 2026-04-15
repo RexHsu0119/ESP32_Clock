@@ -25,19 +25,21 @@ extern "C"
         app_mode_t app_mode;
         boot_hint_t boot_hint;
 
-        alarm_config_t alarm;
+        alarm_config_t alarms[ALARM_SLOT_COUNT];
         alarm_config_t alarm_edit;
         bool alarm_setting_mode;
+        alarm_ui_mode_t alarm_ui_mode;
+        int selected_alarm_index;
         alarm_set_field_t alarm_set_field;
         volatile bool alarm_ringing;
         bool alarm_flash_on;
         int64_t alarm_last_flash_us;
         TaskHandle_t alarm_sound_task_handle;
 
-        int alarm_last_trigger_year;
-        int alarm_last_trigger_yday;
-        int alarm_last_trigger_hour;
-        int alarm_last_trigger_minute;
+        int alarm_last_trigger_year[ALARM_SLOT_COUNT];
+        int alarm_last_trigger_yday[ALARM_SLOT_COUNT];
+        int alarm_last_trigger_hour[ALARM_SLOT_COUNT];
+        int alarm_last_trigger_minute[ALARM_SLOT_COUNT];
 
         bool time_base_valid;
         bool force_unknown_during_sync;
@@ -53,7 +55,7 @@ extern "C"
         int menu_top_index;
         volatile bool request_open_wifi_setup;
         volatile bool request_clear_wifi;
-        clock_panel_t last_clock_panel_before_calendar;
+        clock_panel_t last_clock_panel_before_overlay;
 
         bool confirm_open;
         confirm_action_t confirm_action;
