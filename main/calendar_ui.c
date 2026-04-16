@@ -178,28 +178,6 @@ void calendar_ui_update(bool valid_time,
         }
     }
 
-    if (!valid_time)
-    {
-        lv_label_set_text(s_calendar_year_label, "----");
-        lv_label_set_text(s_calendar_month_label, "--");
-
-        for (int r = 0; r < 6; r++)
-        {
-            for (int c = 0; c < 7; c++)
-            {
-                lv_obj_t *obj = s_calendar_day_labels[r][c];
-                if (obj != NULL)
-                {
-                    lv_label_set_text(obj, "");
-                    lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
-                    lv_obj_set_style_text_color(obj, lv_color_hex(0x555555), 0);
-                }
-            }
-        }
-
-        return;
-    }
-
     calendar_ensure_initialized(year, month);
 
     lv_label_set_text_fmt(s_calendar_year_label, "%04d", *year);
@@ -210,7 +188,7 @@ void calendar_ui_update(bool valid_time,
 
     time_t now = time(NULL);
     struct tm today;
-    bool has_today = (localtime_r(&now, &today) != NULL);
+    bool has_today = valid_time && (localtime_r(&now, &today) != NULL);
 
     int day = 1;
     for (int r = 0; r < 6; r++)
