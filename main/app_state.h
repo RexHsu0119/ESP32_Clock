@@ -52,6 +52,17 @@ extern "C"
         int64_t stopwatch_elapsed_ms;
         int64_t stopwatch_start_time_us;
 
+        bool sd_player_mode;
+        bool sd_player_playing;
+        bool sd_player_connecting;
+        int sd_player_selected_file;
+        int sd_player_active_file;
+        int sd_player_file_count;
+        volatile bool sd_player_stop_requested;
+        TaskHandle_t sd_player_task_handle;
+        char sd_player_status_text[SD_PLAYER_STATUS_TEXT_MAX_LEN];
+        char sd_player_filenames[SD_PLAYER_MAX_FILES][SD_PLAYER_FILENAME_MAX_LEN];
+
         int alarm_last_trigger_year[ALARM_SLOT_COUNT];
         int alarm_last_trigger_yday[ALARM_SLOT_COUNT];
         int alarm_last_trigger_hour[ALARM_SLOT_COUNT];

@@ -56,6 +56,15 @@ static lv_obj_t *s_stopwatch_centisecond_label = NULL;
 static lv_obj_t *s_stopwatch_status_label = NULL;
 static lv_obj_t *s_stopwatch_help_label = NULL;
 
+/* sd player overlay */
+static lv_obj_t *s_sd_player_overlay = NULL;
+static lv_obj_t *s_sd_player_title_label = NULL;
+static lv_obj_t *s_sd_player_status_label = NULL;
+static lv_obj_t *s_sd_player_help_label = NULL;
+static lv_obj_t *s_sd_player_row_bg[3] = {0};
+static lv_obj_t *s_sd_player_item_labels[3] = {0};
+static lv_obj_t *s_sd_player_state_labels[3] = {0};
+
 /* menu overlay */
 static lv_obj_t *s_menu_overlay = NULL;
 static lv_obj_t *s_menu_title_label = NULL;
@@ -903,6 +912,197 @@ void ui_update_stopwatch_overlay_locked(bool stopwatch_mode,
 
     lv_obj_clear_flag(s_stopwatch_overlay, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_stopwatch_overlay);
+}
+
+/* =========================
+ * SD Player overlay
+ * ========================= */
+void ui_create_sd_player_overlay(lv_obj_t *scr)
+{
+    s_sd_player_overlay = lv_obj_create(scr);
+    lv_obj_set_size(s_sd_player_overlay, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_center(s_sd_player_overlay);
+    lv_obj_set_style_bg_color(s_sd_player_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_sd_player_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_sd_player_overlay, 0, 0);
+    lv_obj_set_style_pad_all(s_sd_player_overlay, 0, 0);
+    lv_obj_clear_flag(s_sd_player_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_sd_player_overlay, LV_OBJ_FLAG_HIDDEN);
+
+    s_sd_player_title_label = lv_label_create(s_sd_player_overlay);
+    lv_obj_set_width(s_sd_player_title_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(s_sd_player_title_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(s_sd_player_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_sd_player_title_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(s_sd_player_title_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_sd_player_title_label, "SD MUSIC PLAYER");
+    lv_obj_set_pos(s_sd_player_title_label, 0, 6);
+
+    for (int i = 0; i < 3; i++)
+    {
+        s_sd_player_row_bg[i] = lv_obj_create(s_sd_player_overlay);
+        lv_obj_set_size(s_sd_player_row_bg[i], DISPLAY_WIDTH - 8, 22);
+        lv_obj_set_pos(s_sd_player_row_bg[i], 4, 28 + i * 24);
+        lv_obj_set_style_bg_color(s_sd_player_row_bg[i], lv_color_hex(0x00FFCC), 0);
+        lv_obj_set_style_bg_opa(s_sd_player_row_bg[i], LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(s_sd_player_row_bg[i], 0, 0);
+        lv_obj_set_style_radius(s_sd_player_row_bg[i], 4, 0);
+        lv_obj_set_style_pad_all(s_sd_player_row_bg[i], 0, 0);
+        lv_obj_clear_flag(s_sd_player_row_bg[i], LV_OBJ_FLAG_SCROLLABLE);
+
+        s_sd_player_item_labels[i] = lv_label_create(s_sd_player_overlay);
+        lv_obj_set_width(s_sd_player_item_labels[i], 108);
+        lv_label_set_long_mode(s_sd_player_item_labels[i], LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_align(s_sd_player_item_labels[i], LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_color(s_sd_player_item_labels[i], lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(s_sd_player_item_labels[i], &lv_font_montserrat_12, 0);
+        lv_label_set_text(s_sd_player_item_labels[i], "");
+        lv_obj_set_pos(s_sd_player_item_labels[i], 10, 33 + i * 24);
+
+        s_sd_player_state_labels[i] = lv_label_create(s_sd_player_overlay);
+        lv_obj_set_width(s_sd_player_state_labels[i], 38);
+        lv_label_set_long_mode(s_sd_player_state_labels[i], LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_align(s_sd_player_state_labels[i], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_style_text_color(s_sd_player_state_labels[i], lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_font(s_sd_player_state_labels[i], &lv_font_montserrat_10, 0);
+        lv_label_set_text(s_sd_player_state_labels[i], "");
+        lv_obj_set_pos(s_sd_player_state_labels[i], 116, 35 + i * 24);
+    }
+
+    s_sd_player_status_label = lv_label_create(s_sd_player_overlay);
+    lv_obj_set_width(s_sd_player_status_label, DISPLAY_WIDTH - 12);
+    lv_label_set_long_mode(s_sd_player_status_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(s_sd_player_status_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_sd_player_status_label, lv_color_hex(0x00FFCC), 0);
+    lv_obj_set_style_text_font(s_sd_player_status_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_sd_player_status_label, "Idle");
+    lv_obj_set_pos(s_sd_player_status_label, 6, 102);
+
+    s_sd_player_help_label = lv_label_create(s_sd_player_overlay);
+    lv_obj_set_width(s_sd_player_help_label, DISPLAY_WIDTH);
+    lv_label_set_long_mode(s_sd_player_help_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(s_sd_player_help_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_sd_player_help_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(s_sd_player_help_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(s_sd_player_help_label, "UP/DN file  CENTER play\nLONG back");
+    lv_obj_set_pos(s_sd_player_help_label, 0, 118);
+}
+
+void ui_update_sd_player_overlay_locked(bool sd_player_mode,
+                                        bool sd_player_playing,
+                                        bool sd_player_connecting,
+                                        int selected_file,
+                                        int active_file,
+                                        int file_count,
+                                        const char *status_text,
+                                        ui_menu_item_text_cb_t file_text_cb)
+{
+    int top_index;
+
+    if (s_sd_player_overlay == NULL)
+    {
+        return;
+    }
+
+    if (!sd_player_mode)
+    {
+        lv_obj_add_flag(s_sd_player_overlay, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    top_index = selected_file - 1;
+    if (top_index < 0)
+    {
+        top_index = 0;
+    }
+    if (file_count > 3 && top_index > (file_count - 3))
+    {
+        top_index = file_count - 3;
+    }
+
+    if (s_sd_player_title_label != NULL)
+    {
+        lv_label_set_text(s_sd_player_title_label, "SD MUSIC PLAYER");
+    }
+
+    for (int row = 0; row < 3; row++)
+    {
+        int item_index = top_index + row;
+        bool selected = (item_index == selected_file);
+        bool active = (item_index == active_file);
+
+        if (item_index < file_count)
+        {
+            if (s_sd_player_row_bg[row] != NULL)
+            {
+                lv_obj_set_style_bg_opa(s_sd_player_row_bg[row], selected ? LV_OPA_20 : LV_OPA_TRANSP, 0);
+            }
+
+            if (s_sd_player_item_labels[row] != NULL)
+            {
+                lv_obj_set_style_text_color(s_sd_player_item_labels[row],
+                                            selected ? lv_color_hex(0x00FFCC) : lv_color_hex(0xFFFFFF),
+                                            0);
+                lv_label_set_text(s_sd_player_item_labels[row],
+                                  (file_text_cb != NULL) ? file_text_cb(item_index) : "");
+            }
+
+            if (s_sd_player_state_labels[row] != NULL)
+            {
+                if (active && sd_player_playing)
+                {
+                    lv_obj_set_style_text_color(s_sd_player_state_labels[row], lv_color_hex(0x00FFCC), 0);
+                    lv_label_set_text(s_sd_player_state_labels[row], "PLAY");
+                }
+                else if (active && sd_player_connecting)
+                {
+                    lv_obj_set_style_text_color(s_sd_player_state_labels[row], lv_color_hex(0xFFE082), 0);
+                    lv_label_set_text(s_sd_player_state_labels[row], "WAIT");
+                }
+                else
+                {
+                    lv_obj_set_style_text_color(s_sd_player_state_labels[row], lv_color_hex(0x666666), 0);
+                    lv_label_set_text(s_sd_player_state_labels[row], "");
+                }
+            }
+        }
+        else
+        {
+            if (s_sd_player_row_bg[row] != NULL)
+            {
+                lv_obj_set_style_bg_opa(s_sd_player_row_bg[row], LV_OPA_TRANSP, 0);
+            }
+            if (s_sd_player_item_labels[row] != NULL)
+            {
+                lv_label_set_text(s_sd_player_item_labels[row], "");
+            }
+            if (s_sd_player_state_labels[row] != NULL)
+            {
+                lv_label_set_text(s_sd_player_state_labels[row], "");
+            }
+        }
+    }
+
+    if (s_sd_player_status_label != NULL)
+    {
+        lv_obj_set_style_text_color(s_sd_player_status_label,
+                                    sd_player_playing ? lv_color_hex(0x00FFCC)
+                                                      : (sd_player_connecting ? lv_color_hex(0xFFE082)
+                                                                              : lv_color_hex(0xAAAAAA)),
+                                    0);
+        lv_label_set_text(s_sd_player_status_label, (status_text != NULL) ? status_text : "Idle");
+    }
+
+    if (s_sd_player_help_label != NULL)
+    {
+        lv_label_set_text(s_sd_player_help_label,
+                          (sd_player_playing || sd_player_connecting)
+                              ? "UP/DN file  CENTER stop\nLONG back"
+                              : "UP/DN file  CENTER play\nLONG back");
+    }
+
+    lv_obj_clear_flag(s_sd_player_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_sd_player_overlay);
 }
 
 void ui_update_alarm_overlay_locked(bool alarm_setting_mode,

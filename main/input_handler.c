@@ -249,6 +249,48 @@ void input_handler_handle_button(const input_handler_state_t *state,
         return;
     }
 
+    if (state->sd_player_mode)
+    {
+        if (event_type == BUTTON_SHORT_PRESS || event_type == BUTTON_REPEAT_PRESS)
+        {
+            switch (button_id)
+            {
+            case BUTTON_UP:
+                if (ops->sd_player_move_file != NULL)
+                {
+                    ops->sd_player_move_file(-1);
+                }
+                break;
+
+            case BUTTON_DOWN:
+                if (ops->sd_player_move_file != NULL)
+                {
+                    ops->sd_player_move_file(+1);
+                }
+                break;
+
+            case BUTTON_CENTER:
+                if (event_type == BUTTON_SHORT_PRESS && ops->sd_player_toggle_playback != NULL)
+                {
+                    ops->sd_player_toggle_playback();
+                }
+                break;
+
+            default:
+                break;
+            }
+        }
+        else if (event_type == BUTTON_LONG_PRESS && button_id == BUTTON_CENTER)
+        {
+            if (ops->sd_player_exit != NULL)
+            {
+                ops->sd_player_exit();
+            }
+        }
+
+        return;
+    }
+
     if (event_type == BUTTON_SHORT_PRESS || event_type == BUTTON_REPEAT_PRESS)
     {
         if (state->alarm_setting_mode)

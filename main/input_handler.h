@@ -25,6 +25,9 @@ extern "C"
         bool stopwatch_mode;
         bool stopwatch_running;
         bool stopwatch_paused;
+        bool sd_player_mode;
+        bool sd_player_playing;
+        bool sd_player_connecting;
         bool time_setting_mode;
         bool calendar_active;
         bool calendar_adjust_year_selected;
@@ -59,6 +62,10 @@ extern "C"
         void (*stopwatch_toggle_start_pause)(void);
         void (*stopwatch_reset)(void);
         void (*stopwatch_exit)(void);
+
+        void (*sd_player_move_file)(int delta);
+        void (*sd_player_toggle_playback)(void);
+        void (*sd_player_exit)(void);
 
         void (*alarm_move_selection)(int delta);
         void (*alarm_toggle_selected_enabled)(void);

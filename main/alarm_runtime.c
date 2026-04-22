@@ -4,13 +4,11 @@
 #include <string.h>
 #include <time.h>
 
-#include "driver/gpio.h"
-#include "driver/i2s_std.h"
-
 #include "esp_log.h"
 #include "esp_timer.h"
 
 #include "alarm_logic.h"
+#include "audio_output.h"
 #include "clock_types.h"
 #include "ui.h"
 
@@ -18,17 +16,10 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define AUDIO_I2S_BCLK_GPIO GPIO_NUM_15
-#define AUDIO_I2S_WS_GPIO GPIO_NUM_16
-#define AUDIO_I2S_DOUT_GPIO GPIO_NUM_7
-
 #define AUDIO_SAMPLE_RATE_HZ 16000
 #define AUDIO_TONE_FREQ_HZ 1000
 #define AUDIO_AMPLITUDE 12000
 #define AUDIO_FRAME_SAMPLES 256
-
-static i2s_chan_handle_t s_audio_tx_chan = NULL;
-static bool s_audio_inited = false;
 
 static const char *alarm_runtime_log_tag(const alarm_runtime_context_t *ctx)
 {
@@ -40,51 +31,14 @@ static bool alarm_runtime_context_valid(const alarm_runtime_context_t *ctx)
     return ctx != NULL && ctx->app != NULL;
 }
 
-static void audio_i2s_init(void)
-{
-    if (s_audio_inited)
-    {
-        return;
-    }
-
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    chan_cfg.auto_clear = true;
-
-    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &s_audio_tx_chan, NULL));
-
-    i2s_std_config_t std_cfg = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_SAMPLE_RATE_HZ),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
-        .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,
-            .bclk = AUDIO_I2S_BCLK_GPIO,
-            .ws = AUDIO_I2S_WS_GPIO,
-            .dout = AUDIO_I2S_DOUT_GPIO,
-            .din = I2S_GPIO_UNUSED,
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv = false,
-            },
-        },
-    };
-
-    ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_audio_tx_chan, &std_cfg));
-    ESP_ERROR_CHECK(i2s_channel_enable(s_audio_tx_chan));
-
-    s_audio_inited = true;
-}
-
 static void audio_play_tone_ms(int freq_hz, int duration_ms)
 {
-    if (!s_audio_inited || s_audio_tx_chan == NULL)
+    if (audio_output_set_sample_rate(AUDIO_SAMPLE_RATE_HZ) != ESP_OK)
     {
         return;
     }
 
     int16_t buffer[AUDIO_FRAME_SAMPLES * 2];
-    size_t bytes_written = 0;
-
     const int total_samples = (AUDIO_SAMPLE_RATE_HZ * duration_ms) / 1000;
     const float phase_step = 2.0f * (float)M_PI * (float)freq_hz / (float)AUDIO_SAMPLE_RATE_HZ;
 
@@ -113,12 +67,10 @@ static void audio_play_tone_ms(int freq_hz, int duration_ms)
             }
         }
 
-        ESP_ERROR_CHECK(i2s_channel_write(
-            s_audio_tx_chan,
-            buffer,
-            samples_this_round * sizeof(int16_t) * 2,
-            &bytes_written,
-            portMAX_DELAY));
+        if (audio_output_write_stereo_16(buffer, samples_this_round, portMAX_DELAY) != ESP_OK)
+        {
+            return;
+        }
 
         generated += samples_this_round;
     }
@@ -126,7 +78,7 @@ static void audio_play_tone_ms(int freq_hz, int duration_ms)
 
 static void audio_play_silence_ms(int duration_ms)
 {
-    if (!s_audio_inited || s_audio_tx_chan == NULL)
+    if (audio_output_set_sample_rate(AUDIO_SAMPLE_RATE_HZ) != ESP_OK)
     {
         return;
     }
@@ -134,7 +86,6 @@ static void audio_play_silence_ms(int duration_ms)
     int16_t buffer[AUDIO_FRAME_SAMPLES * 2];
     memset(buffer, 0, sizeof(buffer));
 
-    size_t bytes_written = 0;
     const int total_samples = (AUDIO_SAMPLE_RATE_HZ * duration_ms) / 1000;
     int generated = 0;
 
@@ -146,12 +97,10 @@ static void audio_play_silence_ms(int duration_ms)
             samples_this_round = total_samples - generated;
         }
 
-        ESP_ERROR_CHECK(i2s_channel_write(
-            s_audio_tx_chan,
-            buffer,
-            samples_this_round * sizeof(int16_t) * 2,
-            &bytes_written,
-            portMAX_DELAY));
+        if (audio_output_write_stereo_16(buffer, samples_this_round, portMAX_DELAY) != ESP_OK)
+        {
+            return;
+        }
 
         generated += samples_this_round;
     }
@@ -159,7 +108,6 @@ static void audio_play_silence_ms(int duration_ms)
 
 static void audio_play_beep_ms(int duration_ms)
 {
-    audio_i2s_init();
     audio_play_tone_ms(AUDIO_TONE_FREQ_HZ, duration_ms);
     audio_play_silence_ms(20);
 }
@@ -292,6 +240,11 @@ static void alarm_start(const alarm_runtime_context_t *ctx, int alarm_index)
         return;
     }
 
+    if (ctx->stop_external_audio != NULL)
+    {
+        ctx->stop_external_audio();
+    }
+
     app->alarm_ringing = true;
     app->alarm_flash_on = true;
     app->alarm_last_flash_us = esp_timer_get_time();
@@ -359,6 +312,11 @@ void alarm_runtime_start_timer_alert(const alarm_runtime_context_t *ctx)
     if (app->alarm_ringing || app->timer_alert_active)
     {
         return;
+    }
+
+    if (ctx->stop_external_audio != NULL)
+    {
+        ctx->stop_external_audio();
     }
 
     app->timer_alert_active = true;

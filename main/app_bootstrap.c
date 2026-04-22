@@ -191,6 +191,7 @@ static void app_bootstrap_create_ui(app_bootstrap_context_t *ctx)
         ui_create_alarm_overlay(scr);
         ui_create_timer_overlay(scr);
         ui_create_stopwatch_overlay(scr);
+        ui_create_sd_player_overlay(scr);
         ui_create_menu_overlay(scr);
         ui_create_confirm_overlay(scr);
 

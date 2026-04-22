@@ -78,6 +78,7 @@ typedef enum
     MENU_ITEM_ALARM = 0,
     MENU_ITEM_TIMER,
     MENU_ITEM_STOPWATCH,
+    MENU_ITEM_SD_PLAYER,
     MENU_ITEM_SET_TIME,
     MENU_ITEM_CALENDAR,
     MENU_ITEM_WIFI_SETUP,
@@ -106,3 +107,7 @@ typedef struct
     int minute;
     alarm_repeat_t repeat;
 } alarm_config_t;
+
+#define SD_PLAYER_STATUS_TEXT_MAX_LEN 32
+#define SD_PLAYER_MAX_FILES 64
+#define SD_PLAYER_FILENAME_MAX_LEN 64

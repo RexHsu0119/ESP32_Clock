@@ -14,6 +14,7 @@ extern "C"
         const char *log_tag;
         app_context_t *app;
         int64_t flash_period_us;
+        void (*stop_external_audio)(void);
     } alarm_runtime_context_t;
 
     void alarm_runtime_apply_background_state_locked(const alarm_runtime_context_t *ctx);

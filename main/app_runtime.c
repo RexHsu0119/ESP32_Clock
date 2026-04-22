@@ -41,6 +41,14 @@ static bool app_runtime_context_valid(const app_runtime_context_t *ctx)
            ctx->enter_deep_sleep != NULL;
 }
 
+static void app_runtime_stop_sd_player(app_runtime_context_t *ctx)
+{
+    if (ctx != NULL && ctx->stop_sd_player != NULL)
+    {
+        ctx->stop_sd_player();
+    }
+}
+
 static void app_runtime_handle_clear_wifi(app_runtime_context_t *ctx)
 {
     *ctx->request_clear_wifi = false;
@@ -151,6 +159,7 @@ void app_runtime_process(app_runtime_context_t *ctx)
     if (*ctx->request_deep_sleep)
     {
         *ctx->request_deep_sleep = false;
+        app_runtime_stop_sd_player(ctx);
         ctx->enter_deep_sleep();
     }
 

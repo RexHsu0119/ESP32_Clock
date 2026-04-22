@@ -55,6 +55,16 @@ extern "C"
                                             int stopwatch_state,
                                             int64_t elapsed_ms);
 
+    void ui_create_sd_player_overlay(lv_obj_t *scr);
+    void ui_update_sd_player_overlay_locked(bool sd_player_mode,
+                                            bool sd_player_playing,
+                                            bool sd_player_connecting,
+                                            int selected_file,
+                                            int active_file,
+                                            int file_count,
+                                            const char *status_text,
+                                            ui_menu_item_text_cb_t file_text_cb);
+
     void ui_create_menu_overlay(lv_obj_t *scr);
     void ui_update_menu_overlay_locked(bool menu_open,
                                        bool app_clock_mode,

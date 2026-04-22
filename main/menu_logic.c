@@ -28,6 +28,7 @@ const char *menu_logic_item_text(menu_item_t item)
         "Alarm",
         "Countdown Timer",
         "Stopwatch",
+        "SD Music Player",
         "Set Time",
         "Calendar",
         "Wi-Fi Setup",
@@ -204,6 +205,13 @@ void menu_logic_execute_selected(menu_logic_context_t *ctx)
         if (ctx->enter_stopwatch_mode != NULL)
         {
             ctx->enter_stopwatch_mode();
+        }
+        break;
+
+    case MENU_ITEM_SD_PLAYER:
+        if (ctx->enter_sd_player_mode != NULL)
+        {
+            ctx->enter_sd_player_mode();
         }
         break;
 

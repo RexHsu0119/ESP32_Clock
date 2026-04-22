@@ -35,6 +35,8 @@
 #include "input_handler.h"
 #include "menu_logic.h"
 #include "network_sync.h"
+#include "sd_player_logic.h"
+#include "usb_msc_host.h"
 #include "settings_logic.h"
 #include "stopwatch_logic.h"
 #include "timer_logic.h"
@@ -63,6 +65,7 @@ static const char *TAG = "MAIN";
 
 /* Wi-Fi portal 成功儲存後，保留提示畫面的顯示時間 */
 #define PORTAL_SAVED_STATUS_MS 1500
+#define SD_PLAYER_USB_MOUNT_TIMEOUT_MS 130000
 
 /* forward declarations */
 static void update_ui(void);
@@ -77,6 +80,8 @@ static void menu_execute_selected(void);
 static void start_manual_resync(void);
 static void enter_timer_mode(void);
 static void enter_stopwatch_mode(void);
+static void enter_sd_player_mode(void);
+static void handle_sd_player_media_removed(void);
 static void enter_time_setting_mode(void);
 static void enter_alarm_setting_mode(void);
 static void exit_alarm_setting_mode(void);
@@ -116,6 +121,7 @@ static void ih_timer_ack_done(void);
 static void ih_stopwatch_toggle_start_pause(void);
 static void ih_stopwatch_reset(void);
 static void ih_stopwatch_exit(void);
+static void stop_sd_player_audio(void);
 static void start_timer_done_alert(void);
 static void stop_timer_done_alert(void);
 static void ih_alarm_move_selection(int delta);
@@ -201,6 +207,24 @@ static stopwatch_logic_context_t g_stopwatch_logic = {
     .last_clock_panel_before_overlay = &g_app.last_clock_panel_before_overlay,
 };
 
+static sd_player_logic_context_t g_sd_player_logic = {
+    .log_tag = "MAIN",
+    .sd_player_mode = &g_app.sd_player_mode,
+    .sd_player_playing = &g_app.sd_player_playing,
+    .sd_player_connecting = &g_app.sd_player_connecting,
+    .sd_player_selected_file = &g_app.sd_player_selected_file,
+    .sd_player_active_file = &g_app.sd_player_active_file,
+    .sd_player_file_count = &g_app.sd_player_file_count,
+    .sd_player_stop_requested = &g_app.sd_player_stop_requested,
+    .sd_player_task_handle = &g_app.sd_player_task_handle,
+    .sd_player_status_text = g_app.sd_player_status_text,
+    .sd_player_status_text_size = sizeof(g_app.sd_player_status_text),
+    .sd_player_filenames = g_app.sd_player_filenames,
+    .sd_player_filenames_count = SD_PLAYER_MAX_FILES,
+    .current_panel = &g_app.current_panel,
+    .last_clock_panel_before_overlay = &g_app.last_clock_panel_before_overlay,
+};
+
 static menu_logic_context_t g_menu_logic = {
     .menu_open = &g_app.menu_open,
     .menu_selected = &g_app.menu_selected,
@@ -218,6 +242,7 @@ static menu_logic_context_t g_menu_logic = {
     .calendar_month = &g_app.calendar_month,
     .enter_timer_mode = enter_timer_mode,
     .enter_stopwatch_mode = enter_stopwatch_mode,
+    .enter_sd_player_mode = enter_sd_player_mode,
     .enter_time_setting_mode = enter_time_setting_mode,
     .enter_alarm_setting_mode = enter_alarm_setting_mode,
     .start_manual_resync = start_manual_resync,
@@ -270,6 +295,7 @@ static app_runtime_context_t g_app_runtime = {
     .time_syncing = &g_app.time_syncing,
     .force_unknown_during_sync = &g_app.force_unknown_during_sync,
     .portal_saved_status_ms = PORTAL_SAVED_STATUS_MS,
+    .stop_sd_player = stop_sd_player_audio,
     .enter_deep_sleep = enter_deep_sleep,
 };
 
@@ -277,6 +303,7 @@ static alarm_runtime_context_t g_alarm_runtime = {
     .log_tag = "MAIN",
     .app = &g_app,
     .flash_period_us = ALARM_FLASH_PERIOD_US,
+    .stop_external_audio = stop_sd_player_audio,
 };
 
 #define is_setting_time g_app.is_setting_time
@@ -306,6 +333,13 @@ static alarm_runtime_context_t g_alarm_runtime = {
 #define g_stopwatch_mode g_app.stopwatch_mode
 #define g_stopwatch_state g_app.stopwatch_state
 #define g_stopwatch_elapsed_ms g_app.stopwatch_elapsed_ms
+#define g_sd_player_mode g_app.sd_player_mode
+#define g_sd_player_playing g_app.sd_player_playing
+#define g_sd_player_connecting g_app.sd_player_connecting
+#define g_sd_player_selected_file g_app.sd_player_selected_file
+#define g_sd_player_active_file g_app.sd_player_active_file
+#define g_sd_player_file_count g_app.sd_player_file_count
+#define g_sd_player_status_text g_app.sd_player_status_text
 #define g_time_base_valid g_app.time_base_valid
 #define g_force_unknown_during_sync g_app.force_unknown_during_sync
 #define s_rtc_time_valid g_rtc_time_valid
@@ -328,6 +362,10 @@ static alarm_runtime_context_t g_alarm_runtime = {
 #define lvgl_mutex g_app.lvgl_mutex
 #define g_time_syncing g_app.time_syncing
 #define g_wifi_failed g_app.wifi_failed
+
+/* USB removal detection and delayed menu return */
+static uint32_t s_usb_removal_tick = 0;
+static bool s_usb_removed_detected = false;
 
 static void lvgl_tick_cb(void *arg)
 {
@@ -416,6 +454,87 @@ static void exit_stopwatch_mode(void)
     stopwatch_logic_exit_mode(&g_stopwatch_logic);
 }
 
+static void enter_sd_player_mode(void)
+{
+    esp_err_t mount_ret = usb_msc_host_mount(SD_PLAYER_USB_MOUNT_TIMEOUT_MS);
+    if (mount_ret != ESP_OK)
+    {
+        ESP_LOGW("MAIN", "[DEBUG] USB mount request failed before SD mode: %s", esp_err_to_name(mount_ret));
+        ESP_LOGW("MAIN", "[DEBUG] Skip entering SD Player until USB mount succeeds");
+        return;
+    }
+
+    bool mounted = usb_msc_host_is_mounted();
+    ESP_LOGI("MAIN", "[DEBUG] Entering SD Player mode - USB mounted: %s", mounted ? "YES" : "NO");
+    if (!mounted)
+    {
+        ESP_LOGW("MAIN", "[DEBUG] Skip entering SD Player; USB still not mounted");
+        return;
+    }
+    sd_player_logic_enter_mode(&g_sd_player_logic);
+}
+
+static void stop_sd_player_audio(void)
+{
+    sd_player_logic_force_stop(&g_sd_player_logic, "Interrupted");
+}
+
+static void ih_sd_player_move_file(int delta)
+{
+    sd_player_logic_move_file(&g_sd_player_logic, delta);
+}
+
+static void ih_sd_player_toggle_playback(void)
+{
+    sd_player_logic_toggle_playback(&g_sd_player_logic);
+}
+
+static void ih_sd_player_exit(void)
+{
+    sd_player_logic_exit_mode(&g_sd_player_logic);
+}
+
+static void handle_sd_player_media_removed(void)
+{
+    if (!g_sd_player_mode)
+    {
+        return;
+    }
+
+    if (!s_usb_removed_detected)
+    {
+        /* First detection: stop playback and show "USB Removed" status */
+        ESP_LOGW("MAIN", "[DEBUG] USB media removed during SD Player mode, showing status for 1 second");
+        
+        /* Stop playback but keep SD Player mode active for the delay period */
+        sd_player_logic_force_stop(&g_sd_player_logic, "USB Removed");
+        
+        s_usb_removal_tick = xTaskGetTickCount();
+        s_usb_removed_detected = true;
+        ui_refresh();
+    }
+    else
+    {
+        /* Check if 1 second has elapsed */
+        uint32_t elapsed_ticks = xTaskGetTickCount() - s_usb_removal_tick;
+        uint32_t one_second_ticks = 1000 / portTICK_PERIOD_MS;
+        
+        if (elapsed_ticks >= one_second_ticks)
+        {
+            /* Return to menu after 1 second */
+            ESP_LOGW("MAIN", "[DEBUG] USB removal message displayed for 1 second, returning to menu");
+            
+            /* Now fully exit SD Player mode and return to menu */
+            sd_player_logic_exit_mode(&g_sd_player_logic);
+            g_menu_selected = MENU_ITEM_SD_PLAYER;
+            g_menu_top_index = 0;
+            g_menu_open = true;
+            s_usb_removed_detected = false;
+            ui_refresh();
+        }
+    }
+}
+
 /* =========================
  * Time setting
  * ========================= */
@@ -498,6 +617,11 @@ static const char *menu_item_text(menu_item_t item)
 static const char *ui_menu_item_text_cb(int item)
 {
     return menu_item_text((menu_item_t)item);
+}
+
+static const char *sd_player_file_name_cb(int index)
+{
+    return sd_player_logic_filename(&g_sd_player_logic, index);
 }
 
 static void menu_open(void)
@@ -796,6 +920,15 @@ static void update_ui(void)
                                                (int)g_stopwatch_state,
                                                g_stopwatch_elapsed_ms);
 
+            ui_update_sd_player_overlay_locked(g_sd_player_mode,
+                                               g_sd_player_playing,
+                                               g_sd_player_connecting,
+                                               g_sd_player_selected_file,
+                                               g_sd_player_active_file,
+                                               g_sd_player_file_count,
+                                               g_sd_player_status_text,
+                                               sd_player_file_name_cb);
+
             ui_update_menu_overlay_locked(g_menu_open,
                                           (g_app_mode == APP_MODE_CLOCK),
                                           (int)g_menu_selected,
@@ -900,6 +1033,15 @@ static void update_ui(void)
                                            (int)g_stopwatch_state,
                                            g_stopwatch_elapsed_ms);
 
+        ui_update_sd_player_overlay_locked(g_sd_player_mode,
+                                           g_sd_player_playing,
+                                           g_sd_player_connecting,
+                                           g_sd_player_selected_file,
+                                           g_sd_player_active_file,
+                                           g_sd_player_file_count,
+                                           g_sd_player_status_text,
+                                           sd_player_file_name_cb);
+
         ui_update_menu_overlay_locked(g_menu_open,
                                       (g_app_mode == APP_MODE_CLOCK),
                                       (int)g_menu_selected,
@@ -984,6 +1126,9 @@ static input_handler_state_t build_input_handler_state(void)
         .stopwatch_mode = g_stopwatch_mode,
         .stopwatch_running = (g_stopwatch_state == STOPWATCH_STATE_RUNNING),
         .stopwatch_paused = (g_stopwatch_state == STOPWATCH_STATE_PAUSED),
+        .sd_player_mode = g_sd_player_mode,
+        .sd_player_playing = g_sd_player_playing,
+        .sd_player_connecting = g_sd_player_connecting,
         .time_setting_mode = is_setting_time,
         .calendar_active = (current_panel == PANEL_CALENDAR),
         .calendar_adjust_year_selected = (g_calendar_adjust_field == CALENDAR_ADJUST_YEAR),
@@ -1259,6 +1404,10 @@ void button_event_callback(uint8_t button_id, uint8_t event_type)
         .stopwatch_reset = ih_stopwatch_reset,
         .stopwatch_exit = ih_stopwatch_exit,
 
+        .sd_player_move_file = ih_sd_player_move_file,
+        .sd_player_toggle_playback = ih_sd_player_toggle_playback,
+        .sd_player_exit = ih_sd_player_exit,
+
         .alarm_move_selection = ih_alarm_move_selection,
         .alarm_toggle_selected_enabled = ih_alarm_toggle_selected_enabled,
         .alarm_enter_selected_edit = ih_alarm_enter_selected_edit,
@@ -1301,9 +1450,26 @@ void app_main(void)
         return;
     }
 
+    esp_err_t usb_ret = usb_msc_host_init();
+    if (usb_ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "USB MSC host init failed: %s (SD Player unavailable)", esp_err_to_name(usb_ret));
+    }
+
     while (1)
     {
         app_runtime_process(&g_app_runtime);
+
+        if ((g_sd_player_mode && !usb_msc_host_is_mounted()) || s_usb_removed_detected)
+        {
+            handle_sd_player_media_removed();
+        }
+        else
+        {
+            /* Reset USB removal detection when USB is mounted again */
+            s_usb_removed_detected = false;
+            s_usb_removal_tick = 0;
+        }
 
         vTaskDelay(pdMS_TO_TICKS(50));
     }

@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "alarm_logic.c"
         "alarm_runtime.c"
+        "audio_output.c"
         "app_state.c"
         "app_bootstrap.c"
         "app_runtime.c"
@@ -10,6 +11,7 @@ idf_component_register(
         "input_handler.c"
         "menu_logic.c"
         "network_sync.c"
+        "sd_player_logic.c"
         "settings_logic.c"
         "stopwatch_logic.c"
         "timer_logic.c"
@@ -18,8 +20,10 @@ idf_component_register(
         "main.c"
     INCLUDE_DIRS "."
     REQUIRES
+        espressif__esp_audio_codec
         nvs_flash
         esp_timer
+        esp_http_client
         driver
         display
         button
@@ -28,5 +32,6 @@ idf_component_register(
         weather
         wifi_config
         wifi_portal
+        usb_msc_host
         lvgl
 )

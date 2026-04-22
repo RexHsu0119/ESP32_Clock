@@ -34,6 +34,7 @@ extern "C"
         volatile bool *time_syncing;
         bool *force_unknown_during_sync;
         uint32_t portal_saved_status_ms;
+        void (*stop_sd_player)(void);
         void (*enter_deep_sleep)(void);
     } app_runtime_context_t;
 

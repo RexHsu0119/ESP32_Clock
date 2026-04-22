@@ -11,6 +11,7 @@
 #include "freertos/semphr.h"
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "cJSON.h"
@@ -36,12 +37,12 @@ static const char *TAG = "WEATHER";
     "https://api.open-meteo.com/v1/forecast?latitude=24.903&longitude=121.044&current=temperature_2m,relative_humidity_2m&timezone=Asia%2FTaipei"
 
 #define WEATHER_BACKUP_URL \
-    "https://wttr.in/24.903,121.044?format=%25t%3B%25h"
+    "http://wttr.in/24.903,121.044?format=%25t%3B%25h"
 
 #define WEATHER_HTTP_TIMEOUT_MS 15000
-#define WEATHER_HTTP_RX_BUF_SIZE 4096
-#define WEATHER_HTTP_TX_BUF_SIZE 1024
-#define WEATHER_RESPONSE_BUF_SIZE 4096
+#define WEATHER_HTTP_RX_BUF_SIZE 2048
+#define WEATHER_HTTP_TX_BUF_SIZE 512
+#define WEATHER_RESPONSE_BUF_SIZE 1536
 
 #define WEATHER_PRIMARY_RETRY_COUNT 2
 #define WEATHER_BACKUP_RETRY_COUNT 2
@@ -167,13 +168,19 @@ static bool fetch_weather_payload(const weather_provider_t *provider, char **out
         .event_handler = weather_http_event_handler,
         .user_data = &ctx,
         .timeout_ms = WEATHER_HTTP_TIMEOUT_MS,
-        .transport_type = HTTP_TRANSPORT_OVER_SSL,
+        .transport_type = HTTP_TRANSPORT_UNKNOWN,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .buffer_size = WEATHER_HTTP_RX_BUF_SIZE,
         .buffer_size_tx = WEATHER_HTTP_TX_BUF_SIZE,
         .user_agent = "ESP32-Clock/1.0",
         .keep_alive_enable = false,
     };
+
+    ESP_LOGI(TAG,
+             "[%s] 建立 HTTP client, free_heap=%u, largest_block=%u",
+             provider->name,
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == NULL)
