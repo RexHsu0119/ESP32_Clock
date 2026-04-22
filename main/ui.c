@@ -90,6 +90,7 @@ static lv_obj_t *s_portal_line4_label = NULL;
 static lv_obj_t *s_portal_footer_label = NULL;
 
 #define UI_SETTING_BLINK_PERIOD_US 500000LL
+#define SD_PLAYER_FILENAME_SCROLL_DURATION_MS 12000U
 
 static const char *alarm_list_state_text(const alarm_config_t *alarm)
 {
@@ -953,6 +954,7 @@ void ui_create_sd_player_overlay(lv_obj_t *scr)
         s_sd_player_item_labels[i] = lv_label_create(s_sd_player_overlay);
         lv_obj_set_width(s_sd_player_item_labels[i], 108);
         lv_label_set_long_mode(s_sd_player_item_labels[i], LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_anim_duration(s_sd_player_item_labels[i], SD_PLAYER_FILENAME_SCROLL_DURATION_MS, 0);
         lv_obj_set_style_text_align(s_sd_player_item_labels[i], LV_TEXT_ALIGN_LEFT, 0);
         lv_obj_set_style_text_color(s_sd_player_item_labels[i], lv_color_hex(0xFFFFFF), 0);
         lv_obj_set_style_text_font(s_sd_player_item_labels[i], &lv_font_montserrat_12, 0);
@@ -1043,6 +1045,8 @@ void ui_update_sd_player_overlay_locked(bool sd_player_mode,
                 lv_obj_set_style_text_color(s_sd_player_item_labels[row],
                                             selected ? lv_color_hex(0x00FFCC) : lv_color_hex(0xFFFFFF),
                                             0);
+                lv_label_set_long_mode(s_sd_player_item_labels[row],
+                                       selected ? LV_LABEL_LONG_MODE_SCROLL_CIRCULAR : LV_LABEL_LONG_MODE_CLIP);
                 lv_label_set_text(s_sd_player_item_labels[row],
                                   (file_text_cb != NULL) ? file_text_cb(item_index) : "");
             }
