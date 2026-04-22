@@ -61,7 +61,7 @@ void rtc_sync_from_ntp(void)
     /* 設定 SNTP */
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
-    sntp_set_sync_interval(1800000); /* 0.5 小時同步一次 */
+    sntp_set_sync_interval(3600000); /* 1 小時同步一次 */
 
     esp_sntp_setservername(0, "time.google.com");
     esp_sntp_setservername(1, "time.cloudflare.com");
