@@ -1,7 +1,7 @@
 # Skill: Commit Code with Changelog
 
 ## Purpose
-此技能用於在開發流程中快速執行 Git commit 動作，並自動產生 changelog.txt，記錄從上次 commit 到目前的修改摘要與日期。
+此技能用於在開發流程中快速執行 Git commit 與 push 動作，並自動產生 changelog.txt，記錄從上次 commit 到目前的修改摘要與日期。
 
 ## Usage
 - 觸發詞：`幫我commit code`
@@ -14,7 +14,7 @@
      - 修改檔案清單
      - changelog.txt 新增內容
      - commit 訊息摘要
-  5. 使用者輸入 `Yes` → 執行 commit；輸入 `No` → 取消。
+  5. 使用者輸入 `Yes` → 先執行 commit，再 push 到目前分支；輸入 `No` → 取消。
 
 ## Example
 ```bash
@@ -34,7 +34,7 @@ Changelog 新增：
 - AI 協助整理本次變更摘要與 commit 訊息草稿
 
 Commit 訊息：
-"AAdd commit workflow skill and changelog"
+"Add commit workflow skill and changelog"
 
 是否要執行 commit？ (Yes/No)
 
@@ -44,3 +44,4 @@ Yes
 # 系統執行：
 git add .
 git commit -m "Add commit workflow skill and changelog"
+git push
