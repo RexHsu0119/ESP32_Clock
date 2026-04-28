@@ -1,0 +1,5 @@
+[2026/04/28]
+- 新增 Commit Code with Changelog 技能文件 SKILL.md
+- 定義 commit 前自動整理變更摘要、產生 changelog 與等待 Yes/No 確認的流程
+- 修正 SKILL.md 範例中觸發詞大小寫不一致問題（Code → code）
+- AI 協助整理本次變更摘要與 commit 訊息草稿
